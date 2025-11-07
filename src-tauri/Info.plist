@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDisplayName</key>
+    <string>Mine KB</string>
+    <key>CFBundleName</key>
+    <string>MineKB</string>
+
+    <!-- 麦克风权限说明 -->
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Mine KB需要访问您的麦克风以支持语音输入功能</string>
+
+    <!-- 语音识别权限说明 -->
+    <key>NSSpeechRecognitionUsageDescription</key>
+    <string>Mine KB需要使用语音识别功能来转换您的语音为文字</string>
+</dict>
+</plist>
+

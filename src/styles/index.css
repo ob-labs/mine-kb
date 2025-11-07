@@ -1,0 +1,271 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    /* Light mode colors */
+    --background: 0 0% 100%;
+    --foreground: 222.2 84% 4.9%;
+
+    --card: 0 0% 100%;
+    --card-foreground: 222.2 84% 4.9%;
+
+    --popover: 0 0% 100%;
+    --popover-foreground: 222.2 84% 4.9%;
+
+    --primary: 221.2 83.2% 53.3%;
+    --primary-foreground: 210 40% 98%;
+
+    --secondary: 210 40% 96.1%;
+    --secondary-foreground: 222.2 47.4% 11.2%;
+
+    --muted: 210 40% 96.1%;
+    --muted-foreground: 215.4 16.3% 46.9%;
+
+    --accent: 210 40% 96.1%;
+    --accent-foreground: 222.2 47.4% 11.2%;
+
+    --destructive: 0 84.2% 60.2%;
+    --destructive-foreground: 210 40% 98%;
+
+    --border: 214.3 31.8% 91.4%;
+    --input: 214.3 31.8% 91.4%;
+    --ring: 221.2 83.2% 53.3%;
+
+    --radius: 0.5rem;
+  }
+
+  .dark {
+    /* Dark mode colors */
+    --background: 222.2 84% 4.9%;
+    --foreground: 210 40% 98%;
+
+    --card: 217.2 32.6% 17.5%;
+    --card-foreground: 210 40% 98%;
+
+    --popover: 217.2 32.6% 17.5%;
+    --popover-foreground: 210 40% 98%;
+
+    --primary: 217.2 91.2% 59.8%;
+    --primary-foreground: 0 0% 100%;
+
+    --secondary: 217.2 32.6% 12%;
+    --secondary-foreground: 210 40% 98%;
+
+    --muted: 217.2 32.6% 12%;
+    --muted-foreground: 215 20.2% 65.1%;
+
+    --accent: 217.2 32.6% 12%;
+    --accent-foreground: 210 40% 98%;
+
+    --destructive: 0 62.8% 30.6%;
+    --destructive-foreground: 210 40% 98%;
+
+    --border: 217.2 32.6% 17.5%;
+    --input: 217.2 32.6% 35%;
+    --ring: 224.3 76.3% 48%;
+  }
+}
+
+:root {
+  font-family: Inter, system-ui, Avenir, Helvetica, Arial, sans-serif;
+  line-height: 1.5;
+  font-weight: 400;
+
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  margin: 0;
+  display: flex;
+  place-items: center;
+  min-width: 320px;
+  min-height: 100vh;
+}
+
+#root {
+  width: 100%;
+  height: 100vh;
+  margin: 0 auto;
+}
+
+/* 分割线样式 */
+.resizer {
+  width: 1px;
+  cursor: col-resize;
+  background: transparent;
+  position: relative;
+  flex-shrink: 0;
+  transition: background-color 0.2s;
+}
+
+.resizer:hover {
+  background: hsl(var(--border));
+}
+
+.resizer.resizing {
+  background: hsl(var(--primary) / 0.5);
+}
+
+/* Dark mode下分割线更浅且更细 */
+.dark .resizer {
+  width: 1px;
+}
+
+.dark .resizer:hover {
+  background: hsl(217.2 32.6% 30%);
+}
+
+.dark .resizer.resizing {
+  background: hsl(var(--primary) / 0.7);
+}
+
+/* 拖拽时禁止文本选择 */
+.no-select {
+  user-select: none;
+  -webkit-user-select: none;
+  -moz-user-select: none;
+  -ms-user-select: none;
+}
+
+/* Markdown 渲染样式优化 */
+.prose {
+  color: inherit;
+}
+
+.prose :where(code):not(:where([class~="not-prose"] *)) {
+  background-color: hsl(var(--muted));
+  padding: 0.125rem 0.25rem;
+  border-radius: 0.25rem;
+  font-size: 0.875em;
+  font-weight: 500;
+}
+
+.prose :where(pre):not(:where([class~="not-prose"] *)) {
+  background-color: transparent;
+  padding: 0;
+  margin: 0.5rem 0;
+}
+
+.prose :where(pre code):not(:where([class~="not-prose"] *)) {
+  background-color: transparent;
+  padding: 0;
+  font-size: inherit;
+  font-weight: inherit;
+  border-radius: 0;
+}
+
+.prose :where(p):not(:where([class~="not-prose"] *)) {
+  margin-top: 0.5rem;
+  margin-bottom: 0.5rem;
+}
+
+.prose :where(p):first-child:not(:where([class~="not-prose"] *)) {
+  margin-top: 0;
+}
+
+.prose :where(p):last-child:not(:where([class~="not-prose"] *)) {
+  margin-bottom: 0;
+}
+
+.prose :where(ul, ol):not(:where([class~="not-prose"] *)) {
+  margin-top: 0.5rem;
+  margin-bottom: 0.5rem;
+  padding-left: 1.5rem;
+}
+
+.prose :where(li):not(:where([class~="not-prose"] *)) {
+  margin-top: 0.25rem;
+  margin-bottom: 0.25rem;
+}
+
+.prose :where(blockquote):not(:where([class~="not-prose"] *)) {
+  border-left-width: 4px;
+  border-left-color: hsl(var(--border));
+  padding-left: 1rem;
+  font-style: italic;
+  margin: 0.5rem 0;
+}
+
+.prose :where(h1, h2, h3, h4, h5, h6):not(:where([class~="not-prose"] *)) {
+  margin-top: 1rem;
+  margin-bottom: 0.5rem;
+  font-weight: 600;
+}
+
+.prose :where(h1):first-child:not(:where([class~="not-prose"] *)),
+.prose :where(h2):first-child:not(:where([class~="not-prose"] *)),
+.prose :where(h3):first-child:not(:where([class~="not-prose"] *)),
+.prose :where(h4):first-child:not(:where([class~="not-prose"] *)),
+.prose :where(h5):first-child:not(:where([class~="not-prose"] *)),
+.prose :where(h6):first-child:not(:where([class~="not-prose"] *)) {
+  margin-top: 0;
+}
+
+.prose :where(table):not(:where([class~="not-prose"] *)) {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 0.5rem 0;
+  font-size: 0.875em;
+}
+
+.prose :where(th):not(:where([class~="not-prose"] *)) {
+  border: 1px solid hsl(var(--border));
+  padding: 0.5rem;
+  background-color: hsl(var(--muted));
+  font-weight: 600;
+  text-align: left;
+}
+
+.prose :where(td):not(:where([class~="not-prose"] *)) {
+  border: 1px solid hsl(var(--border));
+  padding: 0.5rem;
+}
+
+.prose :where(a):not(:where([class~="not-prose"] *)) {
+  color: hsl(var(--primary));
+  text-decoration: underline;
+}
+
+.prose :where(a):hover:not(:where([class~="not-prose"] *)) {
+  opacity: 0.8;
+}
+
+.prose :where(hr):not(:where([class~="not-prose"] *)) {
+  border-color: hsl(var(--border));
+  margin: 1rem 0;
+}
+
+/* Splash Screen 动画 */
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes slideUp {
+  from {
+    opacity: 0;
+    transform: translateY(20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-fadeIn {
+  animation: fadeIn 0.5s ease-out;
+}
+
+.animate-slideUp {
+  animation: slideUp 0.6s ease-out;
+}

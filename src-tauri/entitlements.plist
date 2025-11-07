@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- 允许访问麦克风 -->
+    <key>com.apple.security.device.audio-input</key>
+    <true/>
+
+    <!-- 允许网络访问（语音识别需要） -->
+    <key>com.apple.security.network.client</key>
+    <true/>
+
+    <!-- 允许网络服务器 -->
+    <key>com.apple.security.network.server</key>
+    <true/>
+
+    <!-- 允许文件系统读写访问 -->
+    <key>com.apple.security.files.user-selected.read-write</key>
+    <true/>
+
+    <!-- 允许访问下载文件夹 -->
+    <key>com.apple.security.files.downloads.read-write</key>
+    <true/>
+
+    <!-- 禁用应用沙盒（Developer ID 可选，Mac App Store 必需） -->
+    <key>com.apple.security.app-sandbox</key>
+    <false/>
+</dict>
+</plist>
+

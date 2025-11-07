@@ -1,0 +1,13 @@
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "link-args=/SUBSYSTEM:WINDOWS"]
+
+[build]
+# Enable clippy for all builds
+rustflags = ["-D", "warnings"]
+
+[alias]
+# Convenient aliases for common tasks
+check-all = "check --workspace --all-targets --all-features"
+clippy-all = "clippy --workspace --all-targets --all-features -- -D warnings"
+fmt-all = "fmt --all"
+test-all = "test --workspace --all-features"
