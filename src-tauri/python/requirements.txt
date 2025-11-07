@@ -1,0 +1,6 @@
+# Python dependencies for SeekDB bridge
+# Install with: pip install -r requirements.txt
+
+# SeekDB embedded database
+seekdb==0.0.1.dev4
+

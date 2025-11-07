@@ -1,0 +1,379 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>语音功能诊断工具</title>
+    <style>
+        body {
+            font-family: system-ui, -apple-system, sans-serif;
+            max-width: 800px;
+            margin: 40px auto;
+            padding: 20px;
+            background: #f5f5f5;
+        }
+        .container {
+            background: white;
+            border-radius: 12px;
+            padding: 30px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        }
+        h1 {
+            color: #333;
+            margin-bottom: 10px;
+        }
+        .subtitle {
+            color: #666;
+            margin-bottom: 30px;
+        }
+        button {
+            width: 100%;
+            padding: 15px;
+            margin-bottom: 15px;
+            border: none;
+            border-radius: 8px;
+            font-size: 16px;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        button:hover:not(:disabled) {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+        }
+        button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+        .btn-primary {
+            background: #0066ff;
+            color: white;
+        }
+        .btn-secondary {
+            background: #f0f0f0;
+            color: #333;
+        }
+        #log {
+            background: #1e1e1e;
+            color: #d4d4d4;
+            padding: 20px;
+            border-radius: 8px;
+            min-height: 300px;
+            max-height: 500px;
+            overflow-y: auto;
+            font-family: 'Courier New', monospace;
+            font-size: 13px;
+            line-height: 1.6;
+            margin-top: 20px;
+        }
+        .log-line {
+            margin-bottom: 4px;
+        }
+        .log-error { color: #f48771; }
+        .log-success { color: #89d185; }
+        .log-warning { color: #e5c07b; }
+        .log-info { color: #61afef; }
+        .status {
+            display: inline-block;
+            padding: 6px 12px;
+            border-radius: 6px;
+            font-size: 14px;
+            font-weight: 500;
+            margin-bottom: 20px;
+        }
+        .status-testing {
+            background: #e3f2fd;
+            color: #1976d2;
+        }
+        .status-success {
+            background: #e8f5e9;
+            color: #2e7d32;
+        }
+        .status-failed {
+            background: #ffebee;
+            color: #c62828;
+        }
+        .note {
+            background: #fff3cd;
+            border-left: 4px solid #ffc107;
+            padding: 15px;
+            margin-top: 20px;
+            border-radius: 4px;
+        }
+        .note strong {
+            display: block;
+            margin-bottom: 8px;
+            color: #856404;
+        }
+        .note ul {
+            margin: 8px 0;
+            padding-left: 20px;
+            color: #856404;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🎤 语音功能诊断工具</h1>
+        <p class="subtitle">用于测试Tauri环境中的Web Speech API兼容性</p>
+
+        <div id="status"></div>
+
+        <button class="btn-primary" onclick="testWebSpeechAPI()">
+            测试 Web Speech API（语音识别）
+        </button>
+
+        <button class="btn-secondary" onclick="testMediaRecorder()">
+            测试 MediaRecorder（录音功能）
+        </button>
+
+        <button class="btn-secondary" onclick="clearLog()">
+            清空日志
+        </button>
+
+        <div id="log"></div>
+
+        <div class="note">
+            <strong>⚠️ 重要说明：</strong>
+            <ul>
+                <li>如果应用在测试时<strong>崩溃退出</strong>，说明当前环境不支持该API</li>
+                <li>Web Speech API需要网络连接（使用Google云服务）</li>
+                <li>请在测试前打开浏览器开发者工具（Cmd+Option+I）查看console</li>
+                <li>如果Web Speech API导致崩溃，可使用MediaRecorder作为替代方案</li>
+            </ul>
+        </div>
+    </div>
+
+    <script>
+        let logs = [];
+        let testStatus = 'idle';
+
+        function addLog(message, type = 'info') {
+            const timestamp = new Date().toLocaleTimeString();
+            const logLine = `[${timestamp}] ${message}`;
+            logs.push({ message: logLine, type });
+
+            const logDiv = document.getElementById('log');
+            const line = document.createElement('div');
+            line.className = `log-line log-${type}`;
+            line.textContent = logLine;
+            logDiv.appendChild(line);
+            logDiv.scrollTop = logDiv.scrollHeight;
+
+            console.log(message);
+        }
+
+        function setStatus(status) {
+            testStatus = status;
+            const statusDiv = document.getElementById('status');
+
+            if (status === 'idle') {
+                statusDiv.innerHTML = '';
+                return;
+            }
+
+            const statusText = {
+                testing: '测试中...',
+                success: '✅ 测试成功',
+                failed: '❌ 测试失败'
+            }[status];
+
+            statusDiv.innerHTML = `<div class="status status-${status}">${statusText}</div>`;
+        }
+
+        function clearLog() {
+            logs = [];
+            document.getElementById('log').innerHTML = '';
+            setStatus('idle');
+        }
+
+        async function testWebSpeechAPI() {
+            clearLog();
+            setStatus('testing');
+            addLog('====================================', 'info');
+            addLog('开始测试 Web Speech API', 'info');
+            addLog('====================================', 'info');
+
+            try {
+                // 测试1
+                addLog('步骤 1/6: 检查Web Speech API是否存在...', 'info');
+                const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+
+                if (!SpeechRecognition) {
+                    addLog('❌ Web Speech API 不存在', 'error');
+                    setStatus('failed');
+                    return;
+                }
+                addLog('✅ Web Speech API 存在', 'success');
+
+                // 测试2
+                addLog('步骤 2/6: 检查MediaDevices API...', 'info');
+                if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+                    addLog('❌ MediaDevices API 不可用', 'error');
+                    setStatus('failed');
+                    return;
+                }
+                addLog('✅ MediaDevices API 可用', 'success');
+
+                // 测试3
+                addLog('步骤 3/6: 请求麦克风权限...', 'info');
+                try {
+                    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                    addLog('✅ 麦克风权限已授予', 'success');
+                    stream.getTracks().forEach(track => track.stop());
+                } catch (error) {
+                    addLog(`❌ 麦克风权限失败: ${error.message}`, 'error');
+                    setStatus('failed');
+                    return;
+                }
+
+                // 测试4
+                addLog('步骤 4/6: 创建SpeechRecognition实例...', 'info');
+                let recognition;
+                try {
+                    recognition = new SpeechRecognition();
+                    addLog('✅ 实例创建成功', 'success');
+                } catch (error) {
+                    addLog(`❌ 实例创建失败: ${error.message}`, 'error');
+                    setStatus('failed');
+                    return;
+                }
+
+                // 测试5
+                addLog('步骤 5/6: 配置recognition...', 'info');
+                try {
+                    recognition.lang = 'zh-CN';
+                    recognition.continuous = false;
+                    recognition.interimResults = false;
+                    addLog('✅ 配置成功', 'success');
+                } catch (error) {
+                    addLog(`❌ 配置失败: ${error.message}`, 'error');
+                    setStatus('failed');
+                    return;
+                }
+
+                // 测试6 - 最关键的一步
+                addLog('步骤 6/6: 尝试启动recognition...', 'warning');
+                addLog('⚠️  如果应用在此崩溃，说明WKWebView不支持Web Speech API', 'warning');
+                addLog('⏳ 等待中... 最多10秒', 'info');
+
+                await new Promise((resolve, reject) => {
+                    const timeout = setTimeout(() => {
+                        addLog('❌ 启动超时（10秒）', 'error');
+                        try { recognition.abort(); } catch (e) {}
+                        setStatus('failed');
+                        reject(new Error('超时'));
+                    }, 10000);
+
+                    recognition.onstart = () => {
+                        clearTimeout(timeout);
+                        addLog('✅ recognition.onstart 事件触发！', 'success');
+                        addLog('🎉 Web Speech API 完全可用！', 'success');
+                        setTimeout(() => {
+                            try { recognition.stop(); } catch (e) {}
+                        }, 1000);
+                    };
+
+                    recognition.onend = () => {
+                        addLog('✅ recognition.onend 事件触发', 'success');
+                        addLog('====================================', 'info');
+                        addLog('✅ 测试完成：Web Speech API 可用', 'success');
+                        addLog('====================================', 'info');
+                        setStatus('success');
+                        resolve();
+                    };
+
+                    recognition.onerror = (event) => {
+                        clearTimeout(timeout);
+                        addLog(`❌ recognition.onerror: ${event.error}`, 'error');
+                        setStatus('failed');
+                        reject(new Error(event.error));
+                    };
+
+                    try {
+                        recognition.start();
+                        addLog('⏳ start() 调用完成，等待onstart事件...', 'info');
+                    } catch (error) {
+                        clearTimeout(timeout);
+                        addLog(`❌ start() 抛出异常: ${error.message}`, 'error');
+                        setStatus('failed');
+                        reject(error);
+                    }
+                });
+            } catch (error) {
+                addLog(`❌ 测试失败: ${error.message}`, 'error');
+                addLog('====================================', 'info');
+                addLog('结论：Web Speech API 在当前环境不可用', 'error');
+                addLog('====================================', 'info');
+                setStatus('failed');
+            }
+        }
+
+        async function testMediaRecorder() {
+            clearLog();
+            setStatus('testing');
+            addLog('====================================', 'info');
+            addLog('开始测试 MediaRecorder API', 'info');
+            addLog('====================================', 'info');
+
+            try {
+                // 测试1
+                addLog('步骤 1/3: 请求麦克风权限...', 'info');
+                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                addLog('✅ 麦克风权限已授予', 'success');
+
+                // 测试2
+                addLog('步骤 2/3: 测试MediaRecorder API...', 'info');
+                if (!window.MediaRecorder) {
+                    addLog('❌ MediaRecorder 不可用', 'error');
+                    setStatus('failed');
+                    return;
+                }
+
+                const recorder = new MediaRecorder(stream);
+                addLog('✅ MediaRecorder 创建成功', 'success');
+
+                recorder.ondataavailable = (e) => {
+                    addLog(`✅ 录音数据大小: ${e.data.size} bytes`, 'success');
+                };
+
+                recorder.onstart = () => {
+                    addLog('✅ 录音已开始', 'success');
+                };
+
+                recorder.onstop = () => {
+                    addLog('✅ 录音已停止', 'success');
+                    stream.getTracks().forEach(track => track.stop());
+                    addLog('====================================', 'info');
+                    addLog('✅ 测试完成：MediaRecorder 可用！', 'success');
+                    addLog('💡 可以用它实现录音功能，然后调用云端语音识别服务', 'info');
+                    addLog('====================================', 'info');
+                    setStatus('success');
+                };
+
+                // 测试3
+                addLog('步骤 3/3: 开始录音测试...', 'info');
+                recorder.start();
+                addLog('⏳ 录音中... 2秒后自动停止', 'info');
+
+                setTimeout(() => {
+                    recorder.stop();
+                }, 2000);
+            } catch (error) {
+                addLog(`❌ 测试失败: ${error.message}`, 'error');
+                addLog('====================================', 'info');
+                addLog('结论：MediaRecorder 在当前环境不可用', 'error');
+                addLog('====================================', 'info');
+                setStatus('failed');
+            }
+        }
+
+        // 页面加载时的说明
+        window.addEventListener('load', () => {
+            addLog('语音功能诊断工具已就绪', 'info');
+            addLog('请点击上方按钮开始测试', 'info');
+            addLog('', 'info');
+        });
+    </script>
+</body>
+</html>
+

@@ -1,0 +1,21 @@
+{
+  "llm": {
+    "apiKey": "your-api-key-here",
+    "model": "qwen-max",
+    "baseUrl": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    "maxTokens": 4000,
+    "temperature": 0.7,
+    "stream": true
+  },
+  "embedding": {
+    "baseUrl": "https://dashscope.aliyuncs.com/api/v1"
+  },
+  "speech": {
+    "provider": "aliyun",
+    "aliyun": {
+      "access_key_id": "your-access-key-id",
+      "access_key_secret": "your-access-key-secret",
+      "app_key": "your-app-key"
+    }
+  }
+}
