@@ -1,238 +1,241 @@
+[![English](https://img.shields.io/badge/lang-English-blue)](README.md)
+[![中文](https://img.shields.io/badge/lang-中文-red)](README-ZH.md)
+
 <img src="https://mdn.alipayobjects.com/huamei_ytl0i7/afts/img/A*RgJoQp0N_VMAAAAAQGAAAAgAejCYAQ/original" width="64">
 
-<sub>LOGO说明：电影、小说、动漫常借用“第三只眼”作为超能力或觉醒的象征（如《龙珠》中的比克、《沙丘》中的预知能力）</sub>
+<sub>Logo Note: The "third eye" is often used in movies, novels, and anime as a symbol of supernatural abilities or awakening (e.g., Piccolo in Dragon Ball, prescience in Dune)</sub>
 
 
-# MineKB - 个人知识库
+# MineKB - Personal Knowledge Base
 <img src="https://mdn.alipayobjects.com/huamei_ytl0i7/afts/img/A*0gHyQKzD5AcAAAAAbcAAAAgAejCYAQ/original" width="800">
 
-一个基于 SeekDB 数据库实现的本地知识库桌面应用程序。
+A local knowledge base desktop application built on SeekDB.
 
-## 项目介绍
+## Overview
 
-MineKB 是一个基于 Tauri 构建的跨平台桌面应用，旨在帮助用户高效管理和查询本地文档知识库。
+MineKB is a cross-platform desktop application built with Tauri, designed to help users efficiently manage and query their local document knowledge base.
 
-### 核心功能
+### Core Features
 
-- **项目管理**：创建多个知识库项目，每个项目可以包含多个文档
-- **文档处理**：支持上传多种格式的文档（PDF、DOCX 等），自动进行向量化处理
-- **批量导入**：支持从目录批量导入文档，带智能预检查和自动重试机制
-- **智能对话**：通过自然语言与知识库对话，AI 会基于文档内容生成精准回答
-- **向量搜索**：利用语义搜索技术，快速定位相关文档内容
-- **流式输出**：实时流式展示 AI 生成的回答，提供流畅的用户体验
-- **语音交互**：支持语音输入功能，让知识查询更便捷
-- **本地存储**：所有数据存储在本地嵌入式数据库中，保护隐私安
+- **Project Management**: Create multiple knowledge base projects, each containing multiple documents
+- **Document Processing**: Upload documents in various formats (PDF, DOCX, etc.) with automatic vectorization
+- **Batch Import**: Import documents from directories in bulk with intelligent pre-checks and automatic retry mechanisms
+- **Intelligent Chat**: Interact with your knowledge base using natural language; AI generates accurate answers based on document content
+- **Vector Search**: Leverage semantic search technology to quickly locate relevant document content
+- **Streaming Output**: Real-time streaming display of AI-generated responses for a smooth user experience
+- **Voice Interaction**: Voice input support for more convenient knowledge queries
+- **Local Storage**: All data stored in a local embedded database, ensuring privacy and security
 
-## 基本原理
+## Architecture
 
-MineKB 采用 RAG（Retrieval-Augmented Generation）架构，结合向量检索和大语言模型技术：
+MineKB employs a RAG (Retrieval-Augmented Generation) architecture, combining vector retrieval and large language model technologies:
 
-### 工作流程
+### Workflow
 
 ```
-1. 文档上传 → 2. 文本提取 → 3. 向量化处理 → 4. 存储到向量数据库
-                                                          ↓
-6. 流式输出回答 ← 5. LLM生成回答 ← 向量检索相关内容 ← 用户查询
+1. Document Upload → 2. Text Extraction → 3. Vectorization → 4. Store in Vector Database
+                                                                        ↓
+6. Stream Response ← 5. LLM Generates Answer ← Vector Retrieval ← User Query
 ```
 
-### 技术实现
+### Technical Implementation
 
-1. **文档处理**
-   - 支持 PDF、DOCX 等格式文档的文本提取
-   - 对提取的文本进行分块处理
-   - 使用阿里云百炼 API 生成文档的向量表示（Embeddings）
+1. **Document Processing**
+   - Text extraction from PDF, DOCX, and other document formats
+   - Chunking of extracted text
+   - Generation of document embeddings using Alibaba Cloud Bailian API
 
-2. **向量存储**
-   - 使用 SeekDB 0.0.1.dev4 作为嵌入式向量数据库（通过 Python 子进程访问）
-   - 原生支持向量类型和 HNSW 索引，实现高效的向量检索
-   - 支持项目级别的数据隔离和事务处理
-   - 支持向量列输出和数据库存在性验证
+2. **Vector Storage**
+   - SeekDB 0.0.1.dev4 as an embedded vector database (accessed via Python subprocess)
+   - Native support for vector types and HNSW indexing for efficient vector retrieval
+   - Project-level data isolation and transaction support
+   - Vector column output and database existence validation
 
-3. **智能对话**
-   - 用户输入查询后，系统将查询转换为向量
-   - 在当前项目的向量数据库中进行相似度搜索
-   - 将检索到的相关文档片段作为上下文，结合用户查询发送给 LLM
-   - LLM 基于上下文生成准确的回答并流式返回
+3. **Intelligent Chat**
+   - User queries are converted to vectors
+   - Similarity search performed in the current project's vector database
+   - Retrieved relevant document chunks are used as context, combined with the user query and sent to the LLM
+   - The LLM generates accurate answers based on context and streams the response
 
-4. **语音识别**
-   - 集成语音识别服务，支持语音输入查询
-   - 自动将语音转换为文本进行处理
+4. **Speech Recognition**
+   - Integrated speech recognition service supporting voice input queries
+   - Automatic conversion of speech to text for processing
 
-## 🛠️ 技术栈介绍
+## 🛠️ Tech Stack
 
-### 前端技术栈
+### Frontend
 
-**核心框架**
-- **React 18.2.0** - 现代化的 UI 框架
-- **TypeScript 5.2.2** - 类型安全的开发体验
-- **Vite 5.0.8** - 快速的构建工具和开发服务器
+**Core Framework**
+- **React 18.2.0** - Modern UI framework
+- **TypeScript 5.2.2** - Type-safe development experience
+- **Vite 5.0.8** - Fast build tool and development server
 
-**样式系统**
-- **Tailwind CSS 3.3.6** - 实用优先的 CSS 框架
-- **@tailwindcss/typography 0.5** - Markdown 文档排版
-- **class-variance-authority 0.7** - 组件样式变体管理
-- **clsx 2.0 / tailwind-merge 2.0** - CSS 类名合并工具
+**Styling System**
+- **Tailwind CSS 3.3.6** - Utility-first CSS framework
+- **@tailwindcss/typography 0.5** - Markdown document typography
+- **class-variance-authority 0.7** - Component style variant management
+- **clsx 2.0 / tailwind-merge 2.0** - CSS class name merging utilities
 
-**UI 组件库**
-- **Radix UI** - 无障碍的组件基础库
-  - `@radix-ui/react-dialog 1.1.15` - 对话框组件
-  - `@radix-ui/react-alert-dialog 1.1.15` - 警告对话框
-  - `@radix-ui/react-tabs 1.1.13` - 标签页组件
-  - `@radix-ui/react-dropdown-menu 2.1.16` - 下拉菜单
-  - `@radix-ui/react-slot 1.2.3` - 插槽组件
-- **Lucide React 0.294** - 精美的图标库
+**UI Component Library**
+- **Radix UI** - Accessible component primitives
+  - `@radix-ui/react-dialog 1.1.15` - Dialog component
+  - `@radix-ui/react-alert-dialog 1.1.15` - Alert dialog
+  - `@radix-ui/react-tabs 1.1.13` - Tabs component
+  - `@radix-ui/react-dropdown-menu 2.1.16` - Dropdown menu
+  - `@radix-ui/react-slot 1.2.3` - Slot component
+- **Lucide React 0.294** - Beautiful icon library
 
-**内容渲染**
-- **React Markdown 10.1** - Markdown 渲染
-- **React Syntax Highlighter 15.6** - 代码语法高亮
-- **remark-gfm 4.0** - GitHub Flavored Markdown 支持
+**Content Rendering**
+- **React Markdown 10.1** - Markdown rendering
+- **React Syntax Highlighter 15.6** - Code syntax highlighting
+- **remark-gfm 4.0** - GitHub Flavored Markdown support
 
-**开发与测试**
-- **Vitest 1.0** - 快速的单元测试框架
-- **@testing-library/react 16.3** - React 组件测试
-- **@testing-library/jest-dom 6.8** - DOM 断言库
-- **@testing-library/user-event 14.6** - 用户事件模拟
-- **ESLint 8.55** - 代码质量检查
-- **TypeScript ESLint 6.14** - TypeScript 代码规范
+**Development & Testing**
+- **Vitest 1.0** - Fast unit testing framework
+- **@testing-library/react 16.3** - React component testing
+- **@testing-library/jest-dom 6.8** - DOM assertion library
+- **@testing-library/user-event 14.6** - User event simulation
+- **ESLint 8.55** - Code quality linting
+- **TypeScript ESLint 6.14** - TypeScript code standards
 
-### 后端技术栈
+### Backend
 
-**核心技术**
-- **Rust (Edition 2021)** - 高性能的系统编程语言
-- **Tauri 1.5** - 轻量级跨平台桌面应用框架
-  - `@tauri-apps/api 1.5` - 前端 API 调用库
-  - `@tauri-apps/cli 1.5` - 命令行工具
-  - 启用功能：`path-all`、`http-all`、`dialog-all`、`fs-all`、`shell-open`
-- **Python 3.8+** - SeekDB 数据库操作（通过子进程通信）
+**Core Technologies**
+- **Rust (Edition 2021)** - High-performance systems programming language
+- **Tauri 1.5** - Lightweight cross-platform desktop application framework
+  - `@tauri-apps/api 1.5` - Frontend API library
+  - `@tauri-apps/cli 1.5` - Command-line tools
+  - Enabled features: `path-all`, `http-all`, `dialog-all`, `fs-all`, `shell-open`
+- **Python 3.8+** - SeekDB database operations (via subprocess communication)
 
-**数据库**
-- **SeekDB 0.0.1.dev4** (Python) - AI-Native 嵌入式向量数据库
-  - 原生支持向量类型和 HNSW 索引
-  - 支持混合检索和全文搜索
-  - 高性能向量相似度计算
-  - 通过 JSON-RPC 协议与 Rust 通信
+**Database**
+- **SeekDB 0.0.1.dev4** (Python) - AI-Native embedded vector database
+  - Native support for vector types and HNSW indexing
+  - Hybrid search and full-text search support
+  - High-performance vector similarity computation
+  - Communication with Rust via JSON-RPC protocol
 
-### Rust 核心依赖
+### Rust Core Dependencies
 
-**文档处理**
-- `pdf-extract 0.7` - PDF 文本提取
-- `docx-rs 0.4` - Word 文档处理
+**Document Processing**
+- `pdf-extract 0.7` - PDF text extraction
+- `docx-rs 0.4` - Word document processing
 
-**数据存储**
-- `seekdb 0.0.1.dev4` (Python) - AI-Native 嵌入式数据库，原生支持向量索引和 HNSW 检索
-- JSON 通信协议 - Rust 与 Python 子进程通信
+**Data Storage**
+- `seekdb 0.0.1.dev4` (Python) - AI-Native embedded database with native vector indexing and HNSW retrieval
+- JSON communication protocol - Rust to Python subprocess communication
 
-**向量计算**
-- SeekDB 原生向量索引 (HNSW) - 高效向量相似度搜索
-- Rust 标准库 - 余弦相似度等数学计算（无需第三方依赖）
+**Vector Computation**
+- SeekDB native vector indexing (HNSW) - Efficient vector similarity search
+- Rust standard library - Mathematical computations like cosine similarity (no third-party dependencies required)
 
-**网络通信**
-- `reqwest 0.11` - HTTP 客户端，用于调用 AI API（支持 json、stream、blocking）
+**Network Communication**
+- `reqwest 0.11` - HTTP client for AI API calls (supports json, stream, blocking)
 
-**序列化与编解码**
-- `serde 1.0` / `serde_json 1.0` - JSON 序列化与反序列化
-- `bincode 1.3` - 向量数据二进制序列化
-- `base64 0.22.1` - Base64 编解码（语音数据传输）
+**Serialization & Encoding**
+- `serde 1.0` / `serde_json 1.0` - JSON serialization and deserialization
+- `bincode 1.3` - Binary serialization for vector data
+- `base64 0.22.1` - Base64 encoding/decoding (for voice data transmission)
 
-**语音识别**
-- `hmac 0.12` - HMAC 签名算法
-- `sha1 0.10` / `sha2 0.10` - SHA 哈希算法
-- `url 2.4` / `urlencoding 2.1` - URL 编码处理
+**Speech Recognition**
+- `hmac 0.12` - HMAC signature algorithm
+- `sha1 0.10` / `sha2 0.10` - SHA hash algorithms
+- `url 2.4` / `urlencoding 2.1` - URL encoding utilities
 
-**系统工具**
-- `chrono 0.4` - 日期时间处理（支持 serde）
-- `uuid 1.0` - 唯一标识符生成（v4 + serde）
-- `anyhow 1.0` / `thiserror 1.0` - 错误处理
-- `regex 1.0` - 正则表达式
-- `walkdir 2.0` - 文件系统遍历
+**System Utilities**
+- `chrono 0.4` - Date and time handling (with serde support)
+- `uuid 1.0` - Unique identifier generation (v4 + serde)
+- `anyhow 1.0` / `thiserror 1.0` - Error handling
+- `regex 1.0` - Regular expressions
+- `walkdir 2.0` - Filesystem traversal
 
-**异步编程**
-- `tokio 1.x` - 异步运行时（full features）
-- `futures 0.3` - Future 组合器和工具
-- `async-stream 0.3` - 异步流宏（用于流式输出）
+**Async Programming**
+- `tokio 1.x` - Async runtime (full features)
+- `futures 0.3` - Future combinators and utilities
+- `async-stream 0.3` - Async stream macros (for streaming output)
 
-**日志系统**
-- `log 0.4` - 日志门面
-- `env_logger 0.10` - 环境变量日志实现
+**Logging**
+- `log 0.4` - Logging facade
+- `env_logger 0.10` - Environment variable-based logger implementation
 
 
-### AI 服务
+### AI Services
 
-- **阿里云百炼 API** - 用于文本 Embedding 和大语言模型对话
+- **Alibaba Cloud Bailian API** - For text embeddings and large language model conversations
 
-## 系统架构
+## System Architecture
 
-### 架构概览
-<img src="https://mdn.alipayobjects.com/huamei_ytl0i7/afts/img/A*Cuf4RoPSfwMAAAAAT-AAAAgAejCYAQ/original">
+### Architecture Overview
+<img src="https://mdn.alipayobjects.com/huamei_ytl0i7/afts/img/A*wk6ST4g16wYAAAAAgFAAAAgAejCYAQ/original">
 
-## 快速开始
+## Quick Start
 
-### 环境要求
+### Requirements
 
 - Node.js 16+
 - Rust 1.70+
 - Python 3.8+
 
-> **注意**: SeekDB 目前仅发布 Linux 版本，不久会支持 MacOS。MacOS 用户推荐使用 [UTM](https://mac.getutm.app) 虚拟机管理器运行 [Ubuntu 20.x 以上](https://mac.getutm.app/gallery/ubuntu-20-04)。
+> **Note**: SeekDB currently only releases Linux builds. macOS support is coming soon. macOS users are recommended to use [UTM](https://mac.getutm.app) virtual machine manager to run [Ubuntu 20.x or later](https://mac.getutm.app/gallery/ubuntu-20-04).
 
-### 安装依赖
+### Install Dependencies
 
 ```bash
-# 安装前端依赖
+# Install frontend dependencies
 npm install
 
-# Rust 和 Python 依赖会在构建时自动安装
+# Rust and Python dependencies are automatically installed during build
 ```
 
-### 配置
+### Configuration
 
-1. 复制配置文件模板：
+1. Copy the configuration template:
 ```bash
 cp src-tauri/config.example.json src-tauri/config.json
 ```
 
-2. 编辑 `src-tauri/config.json`，填入阿里云百炼 API 密钥等配置信息
+2. Edit `src-tauri/config.json` and fill in your Alibaba Cloud Bailian API credentials and other configuration
 
-### 开发模式
+### Development Mode
 
 ```bash
-# 启动开发服务器
+# Start development server
 tnpm run tauri:dev
 ```
 
-### 构建应用
+### Build Application
 
 ```bash
-# 构建生产版本
+# Build production version
 tnpm run tauri:build
 ```
 
-构建完成后，应用程序将位于 `src-tauri/target/release/bundle/` 目录下。
+After building, the application will be located in the `src-tauri/target/release/bundle/` directory.
 
 ---
 
-## 测试
+## Testing
 
 ```bash
-# 运行前端测试
+# Run frontend tests
 tnpm test
 
-# 运行测试 UI
+# Run test UI
 tnpm run test:ui
 
-# 运行 Rust 测试
+# Run Rust tests
 cd src-tauri && cargo test
 ```
 
 
-### 为什么选择 SeekDB？
+### Why SeekDB?
 
-- ✅ **原生向量支持**：无需序列化/反序列化，性能提升 10-100x
-- ✅ **HNSW 索引**：专业的向量索引算法，检索更快更准
-- ✅ **AI-Native 特性**：内置全文检索、混合检索等 AI 能力
-- ✅ **更好的扩展性**：支持更大规模的数据和更复杂的查询
-- ✅ **最新版本特性**（0.0.1.dev4）：向量列输出、数据库验证、USE 语句稳定支持
+- ✅ **Native Vector Support**: No serialization/deserialization overhead, 10-100x performance improvement
+- ✅ **HNSW Indexing**: Professional vector indexing algorithm for faster and more accurate retrieval
+- ✅ **AI-Native Features**: Built-in full-text search, hybrid search, and other AI capabilities
+- ✅ **Better Scalability**: Supports larger datasets and more complex queries
+- ✅ **Latest Version Features** (0.0.1.dev4): Vector column output, database validation, stable USE statement support
 
 ---
 
-**MineKB** - 让知识管理更智能 🚀🚀🚀
+**MineKB** - Making Knowledge Management Smarter 🚀🚀🚀
