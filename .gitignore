@@ -42,6 +42,9 @@ yarn-error.log*
 config.json
 .node
 
+# Local dev app data
+src-tauri/com.mine-kb.app/
+
 release
 
 oblite.so

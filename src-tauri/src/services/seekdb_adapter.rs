@@ -1,11 +1,106 @@
 use anyhow::{anyhow, Result};
+use async_trait::async_trait;
+use seekdb_rs::{
+    Client, DeleteQuery, DistanceMetric, EmbeddedDatabase, Filter, HnswConfig, HybridKnn,
+    IncludeField, QueryParam, QueryResult, row_to_json_values, SeekDbError, UpsertBatch,
+};
+use seekdb_rs::EmbeddingFunction;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use std::time::Instant;
 
-use super::python_subprocess::PythonSubprocess;
+const VECTOR_COLLECTION_NAME: &str = "vector_documents";
+const VECTOR_DIMENSION: u32 = 1536;
+
+fn embedding_f64_to_f32(v: &[f64]) -> Vec<f32> {
+    v.iter().map(|&x| x as f32).collect()
+}
+
+/// 将文档/查询文本转为向量，委托 DashScope 服务，用于混合检索时对 query 文本做向量化。
+pub struct DashScopeEmbeddingFunction {
+    pub service: Arc<crate::services::dashscope_embedding_service::DashScopeEmbeddingService>,
+}
+
+#[async_trait]
+impl EmbeddingFunction for DashScopeEmbeddingFunction {
+    async fn embed_documents(&self, docs: &[String]) -> std::result::Result<Vec<Vec<f32>>, SeekDbError> {
+        if docs.is_empty() {
+            return Ok(Vec::new());
+        }
+        let texts: Vec<String> = docs.to_vec();
+        let embeddings = self
+            .service
+            .embed_batch(&texts)
+            .await
+            .map_err(|e| SeekDbError::Embedding(e.to_string()))?;
+        Ok(embeddings
+            .into_iter()
+            .map(|v: Vec<f64>| v.into_iter().map(|x| x as f32).collect::<Vec<f32>>())
+            .collect::<Vec<Vec<f32>>>())
+    }
+    fn dimension(&self) -> usize {
+        self.service.embedding_dim()
+    }
+}
+
+fn doc_to_meta(doc: &VectorDocument) -> Value {
+    let mut m = serde_json::Map::new();
+    m.insert("project_id".to_string(), json!(doc.project_id));
+    m.insert("document_id".to_string(), json!(doc.document_id));
+    m.insert("chunk_index".to_string(), json!(doc.chunk_index));
+    for (k, v) in &doc.metadata {
+        m.insert(k.clone(), Value::String(v.clone()));
+    }
+    Value::Object(m)
+}
+
+fn meta_to_doc_meta(meta: &Value) -> HashMap<String, String> {
+    let mut out = HashMap::new();
+    if let Some(obj) = meta.as_object() {
+        for (k, v) in obj {
+            if k == "project_id" || k == "document_id" || k == "chunk_index" {
+                continue;
+            }
+            if let Some(s) = v.as_str() {
+                out.insert(k.clone(), s.to_string());
+            }
+        }
+    }
+    out
+}
+
+fn query_result_to_search_results(qr: QueryResult, limit: usize) -> Vec<SearchResult> {
+    let ids = qr.ids.get(0).map(|v| v.as_slice()).unwrap_or(&[]);
+    let docs = qr.documents.as_ref().and_then(|d| d.get(0)).map(|v| v.as_slice()).unwrap_or(&[]);
+    let metas = qr.metadatas.as_ref().and_then(|m| m.get(0)).map(|v| v.as_slice()).unwrap_or(&[]);
+    let dists = qr.distances.as_ref().and_then(|d| d.get(0)).map(|v| v.as_slice()).unwrap_or(&[]);
+    let mut results = Vec::new();
+    for (i, id) in ids.iter().take(limit).enumerate() {
+        let content = docs.get(i).cloned().unwrap_or_default();
+        let meta = metas.get(i).cloned().unwrap_or(json!({}));
+        let project_id = meta.get("project_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let document_id = meta.get("document_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let chunk_index = meta.get("chunk_index").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+        let distance = dists.get(i).copied().unwrap_or(0.0);
+        let similarity = 1.0 / (1.0 + distance as f64);
+        results.push(SearchResult {
+            document: VectorDocument {
+                id: id.clone(),
+                project_id,
+                document_id,
+                chunk_index,
+                content,
+                embedding: vec![],
+                metadata: meta_to_doc_meta(&meta),
+            },
+            similarity,
+        });
+    }
+    results
+}
 
 /// Vector document structure (same as before)
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -26,110 +121,150 @@ pub struct SearchResult {
     pub similarity: f64,
 }
 
-/// SeekDB adapter - manages database operations through Python subprocess
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct SeekDbAdapter {
-    subprocess: Arc<Mutex<PythonSubprocess>>,
+    client: Client,
+    hnsw_config: HnswConfig,
     db_path: String,
     db_name: String,
 }
 
-impl SeekDbAdapter {
-    /// Create new SeekDB adapter instance
-    pub fn new<P: AsRef<Path>>(db_path: P) -> Result<Self> {
-        Self::new_with_python(db_path, "python3")
+impl std::fmt::Debug for SeekDbAdapter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SeekDbAdapter")
+            .field("db_path", &self.db_path)
+            .field("db_name", &self.db_name)
+            .finish_non_exhaustive()
     }
-    
-    /// Create new SeekDB adapter instance with custom Python executable
-    pub fn new_with_python<P: AsRef<Path>>(db_path: P, python_executable: &str) -> Result<Self> {
-        let db_path_str = db_path.as_ref().display().to_string();
-        log::info!("🔗 [NEW-DB] Opening SeekDB: {}", db_path_str);
-        
-        // Get absolute path for database directory
-        let db_dir = if db_path.as_ref().is_absolute() {
-            db_path.as_ref().parent().unwrap().to_path_buf()
+}
+
+/// 将 JSON 值转为 SQL 参数（用于参数化查询）。
+fn value_to_query_param(v: &Value) -> QueryParam {
+    QueryParam::from_metadata_value(v)
+}
+
+fn seekdb_err(e: seekdb_rs::SeekDbError) -> anyhow::Error {
+    anyhow!("SeekDB: {}", e)
+}
+
+/// 解析 DB 返回的 created_at，兼容两种格式，避免解析失败导致顺序错乱。
+fn parse_datetime_from_db(s: &str) -> chrono::DateTime<chrono::Utc> {
+    use chrono::{DateTime, NaiveDateTime, Utc};
+    if s.is_empty() {
+        return Utc::now();
+    }
+    if let Ok(dt) = DateTime::parse_from_rfc3339(s) {
+        return dt.with_timezone(&Utc);
+    }
+    if let Ok(naive) = NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S") {
+        return DateTime::from_naive_utc_and_offset(naive, Utc);
+    }
+    Utc::now()
+}
+
+impl SeekDbAdapter {
+    /// 使用 `db_path` 作为 SeekDB 实例目录；数据集中在该目录下。
+    /// 异步构建，需在 async 上下文中调用。
+    pub async fn new_async<P: AsRef<Path>>(db_path: P) -> Result<Self> {
+        let db_path_ref = db_path.as_ref();
+        let db_dir = if db_path_ref.is_absolute() {
+            db_path_ref.to_path_buf()
         } else {
-            std::env::current_dir()?.join(db_path.as_ref()).parent().unwrap().to_path_buf()
+            std::env::current_dir()?.join(db_path_ref)
         };
-        
-        // Get the database file name (without extension) and normalize it
-        // Replace hyphens with underscores for SQL compatibility
-        let db_name = db_path.as_ref()
-            .file_stem()
+        let db_path_str = db_dir.display().to_string();
+        let db_dir_str = db_path_str.clone();
+        let db_name = db_dir
+            .file_name()
             .and_then(|s| s.to_str())
-            .unwrap_or("mine_kb")
-            .replace("-", "_");  // Normalize: mine-kb -> mine_kb
-        
-        log::info!("🔗 [NEW-DB] Database directory: {:?}", db_dir);
+            .map(|s| s.trim_end_matches(".db").replace('-', "_"))
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "mine_kb".to_string());
+
+        log::info!("🔗 [NEW-DB] Opening embedded SeekDB: {}", db_path_str);
         log::info!("🔗 [NEW-DB] Database name: {}", db_name);
-        log::info!("🔗 [NEW-DB] Python executable: {}", python_executable);
-        
-        // Determine Python script path with multiple fallbacks
-        let script_path = std::env::current_exe()
-            .ok()
-            .and_then(|exe| exe.parent().map(|p| p.join("python/seekdb_bridge.py")))
-            .filter(|p| p.exists())
-            .or_else(|| {
-                // Try to find script relative to current directory
-                if let Ok(cwd) = std::env::current_dir() {
-                    log::debug!("🔍 Current directory: {:?}", cwd);
-                    
-                    // Try multiple possible locations
-                    let candidates = vec![
-                        cwd.join("python/seekdb_bridge.py"),                // If in src-tauri
-                        cwd.join("src-tauri/python/seekdb_bridge.py"),      // If in project root
-                        cwd.parent()?.join("python/seekdb_bridge.py"),      // If in src-tauri/src
-                    ];
-                    
-                    for candidate in candidates {
-                        log::debug!("🔍 Checking: {:?}", candidate);
-                        if candidate.exists() {
-                            log::info!("✅ Found script at: {:?}", candidate);
-                            return Some(candidate);
-                        }
-                    }
-                }
-                None
-            })
-            .unwrap_or_else(|| {
-                // Last resort: use relative path and hope for the best
-                log::warn!("⚠️ Could not find seekdb_bridge.py in expected locations");
-                std::path::PathBuf::from("src-tauri/python/seekdb_bridge.py")
-            });
-        
-        log::info!("🔗 [NEW-DB] Python script: {:?}", script_path);
-        
-        // Start Python subprocess with specified Python executable
-        let subprocess = PythonSubprocess::new_with_python(
-            script_path.to_str().unwrap(),
-            python_executable
-        )?;
-        
-        // Initialize database - use the actual db_path passed to the function
-        subprocess.init_db(&db_path_str, &db_name)?;
-        
+
+        let t_open = Instant::now();
+        EmbeddedDatabase::open(&db_dir).map_err(|e| anyhow!("SeekDB open: {}", e))?;
+        log::info!("🔗 [NEW-DB] Open data dir took {:?}", t_open.elapsed());
+
+        let t_build = Instant::now();
+        let client = Client::builder()
+            .path(&db_dir_str)
+            .database(&db_name)
+            .build()
+            .await
+            .map_err(seekdb_err)?;
+        log::info!("🔗 [NEW-DB] Build client took {:?}", t_build.elapsed());
+
+        let hnsw_config = HnswConfig::new(VECTOR_DIMENSION, DistanceMetric::L2)
+            .map_err(|e| anyhow!("HnswConfig: {}", e))?;
+
         let adapter = Self {
-            subprocess: Arc::new(Mutex::new(subprocess)),
-            db_path: db_path_str.clone(),
-            db_name: db_name.clone(),
+            client,
+            hnsw_config,
+            db_path: db_path_str,
+            db_name,
         };
-        
-        // Initialize schema
-        adapter.initialize_schema()?;
-        
-        log::info!("🔗 [NEW-DB] SeekDB adapter initialized successfully");
-        
+        let t_schema = Instant::now();
+        adapter.initialize_schema().await?;
+        log::info!("🔗 [NEW-DB] Init schema took {:?}", t_schema.elapsed());
+        log::info!("🔗 [NEW-DB] Database ready");
         Ok(adapter)
     }
-    
-    /// Initialize database schema
-    fn initialize_schema(&self) -> Result<()> {
-        log::info!("📋 Initializing database schema...");
-        
-        let subprocess = self.subprocess.lock().unwrap();
-        
-        // Create projects table
-        subprocess.execute(
+
+    async fn execute(&self, sql: &str, params: Vec<Value>) -> Result<()> {
+        let params_q: Vec<QueryParam> = params.iter().map(value_to_query_param).collect();
+        let params_ref = if params_q.is_empty() {
+            None
+        } else {
+            Some(params_q.as_slice())
+        };
+        self.client.execute(sql, params_ref).await.map_err(seekdb_err)
+    }
+
+    async fn execute_no_params(&self, sql: &str) -> Result<()> {
+        self.client.execute(sql, None).await.map_err(seekdb_err)
+    }
+
+    async fn query(&self, sql: &str, params: Vec<Value>) -> Result<Vec<Vec<Value>>> {
+        let params_q: Vec<QueryParam> = params.iter().map(value_to_query_param).collect();
+        let params_ref = if params_q.is_empty() {
+            None
+        } else {
+            Some(params_q.as_slice())
+        };
+        let max_cols = 64usize;
+        let rows = self.client.fetch_all(sql, params_ref).await.map_err(seekdb_err)?;
+        let converted: Vec<Vec<Value>> = rows
+            .into_iter()
+            .map(|r| row_to_json_values(r.as_ref(), max_cols))
+            .collect();
+        Ok(converted)
+    }
+
+    async fn query_one(&self, sql: &str, params: Vec<Value>) -> Result<Option<Vec<Value>>> {
+        let rows = self.query(sql, params).await?;
+        Ok(rows.into_iter().next())
+    }
+
+    async fn commit(&self) -> Result<()> {
+        self.execute_no_params("COMMIT").await
+    }
+
+    /// Initialize database schema（每步打耗时日志，便于排查慢的根因）
+    async fn initialize_schema(&self) -> Result<()> {
+        log::info!("📋 Initializing schema...");
+
+        let run = |name: String, sql: String| async move {
+            let t = Instant::now();
+            self.execute_no_params(&sql).await?;
+            log::info!("📋 [schema] {} took {:?}", name, t.elapsed());
+            Ok::<(), anyhow::Error>(())
+        };
+
+        run(
+            "CREATE TABLE projects".to_string(),
             "CREATE TABLE IF NOT EXISTS projects (
                 id VARCHAR(36) PRIMARY KEY,
                 name TEXT NOT NULL,
@@ -138,41 +273,12 @@ impl SeekDbAdapter {
                 document_count INTEGER DEFAULT 0,
                 created_at DATETIME NOT NULL,
                 updated_at DATETIME NOT NULL
-            )",
-            vec![],
-        )?;
-        
-        // Create vector_documents table with vector index and fulltext index for hybrid search
-        subprocess.execute(
-            "CREATE TABLE IF NOT EXISTS vector_documents (
-                id VARCHAR(36) PRIMARY KEY,
-                project_id VARCHAR(36) NOT NULL,
-                document_id VARCHAR(36) NOT NULL,
-                chunk_index INTEGER NOT NULL,
-                content TEXT NOT NULL,
-                embedding vector(1536),
-                metadata TEXT NOT NULL,
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE(document_id, chunk_index),
-                VECTOR INDEX idx_embedding(embedding) WITH (distance=l2, type=hnsw, lib=vsag),
-                FULLTEXT idx_content(content)
-            )",
-            vec![],
-        )?;
-        
-        // Create regular indexes
-        subprocess.execute(
-            "CREATE INDEX IF NOT EXISTS idx_project_id ON vector_documents(project_id)",
-            vec![],
-        )?;
-        
-        subprocess.execute(
-            "CREATE INDEX IF NOT EXISTS idx_document_id ON vector_documents(document_id)",
-            vec![],
-        )?;
-        
-        // Create conversations table
-        subprocess.execute(
+            )".to_string(),
+        )
+        .await?;
+
+        run(
+            "CREATE TABLE conversations".to_string(),
             "CREATE TABLE IF NOT EXISTS conversations (
                 id VARCHAR(36) PRIMARY KEY,
                 project_id VARCHAR(36) NOT NULL,
@@ -180,13 +286,14 @@ impl SeekDbAdapter {
                 created_at DATETIME NOT NULL,
                 updated_at DATETIME NOT NULL,
                 message_count INTEGER DEFAULT 0,
-                FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
-            )",
-            vec![],
-        )?;
-        
-        // Create messages table
-        subprocess.execute(
+                FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
+                KEY idx_conversation_project_id(project_id)
+            )".to_string(),
+        )
+        .await?;
+
+        run(
+            "CREATE TABLE messages".to_string(),
             "CREATE TABLE IF NOT EXISTS messages (
                 id VARCHAR(36) PRIMARY KEY,
                 conversation_id VARCHAR(36) NOT NULL,
@@ -194,482 +301,345 @@ impl SeekDbAdapter {
                 content TEXT NOT NULL,
                 created_at DATETIME NOT NULL,
                 sources TEXT,
-                FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
-            )",
-            vec![],
-        )?;
-        
-        // Create conversation indexes
-        subprocess.execute(
-            "CREATE INDEX IF NOT EXISTS idx_conversation_project_id ON conversations(project_id)",
-            vec![],
-        )?;
-        
-        subprocess.execute(
-            "CREATE INDEX IF NOT EXISTS idx_message_conversation_id ON messages(conversation_id)",
-            vec![],
-        )?;
-        
-        // Commit schema changes
-        subprocess.commit()?;
-        
+                FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE,
+                KEY idx_message_conversation_id(conversation_id)
+            )".to_string(),
+        )
+        .await?;
+
+        let t_commit = Instant::now();
+        self.commit().await?;
+        log::info!("📋 [schema] COMMIT took {:?}", t_commit.elapsed());
         log::info!("✅ Database schema initialized");
         Ok(())
     }
-    
-    /// Add a single vector document
-    pub fn add_document(&mut self, doc: VectorDocument) -> Result<()> {
-        let subprocess = self.subprocess.lock().unwrap();
-        
-        let metadata_json = serde_json::to_string(&doc.metadata)?;
-        
-        // Convert embedding to JSON array string format for SeekDB
-        let embedding_str = format!("[{}]", 
-            doc.embedding.iter()
-                .map(|v| v.to_string())
-                .collect::<Vec<_>>()
-                .join(",")
-        );
-        
-        subprocess.execute(
-            "INSERT INTO vector_documents 
-             (id, project_id, document_id, chunk_index, content, embedding, metadata, created_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, NOW())
-             ON DUPLICATE KEY UPDATE 
-                content = VALUES(content),
-                embedding = VALUES(embedding),
-                metadata = VALUES(metadata)",
-            vec![
-                Value::String(doc.id),
-                Value::String(doc.project_id),
-                Value::String(doc.document_id),
-                Value::Number(doc.chunk_index.into()),
-                Value::String(doc.content),
-                Value::String(embedding_str),
-                Value::String(metadata_json),
-            ],
-        )?;
-        
-        Ok(())
+
+    /// Add a single vector document.
+    pub async fn add_document(&self, doc: VectorDocument) -> Result<()> {
+        let coll = self
+            .client
+            .get_or_create_collection::<DashScopeEmbeddingFunction>(
+                VECTOR_COLLECTION_NAME,
+                Some(self.hnsw_config.clone()),
+                None,
+            )
+            .await
+            .map_err(seekdb_err)?;
+        let id = doc.id.clone();
+        let emb = embedding_f64_to_f32(&doc.embedding);
+        let meta = doc_to_meta(&doc);
+        let content = doc.content.clone();
+        coll.upsert_batch(
+            UpsertBatch::new(&[id])
+                .embeddings(&[emb])
+                .metadatas(&[meta])
+                .documents(&[content]),
+        )
+        .await
+        .map_err(seekdb_err)
     }
-    
-    /// Add multiple vector documents in a transaction
-    pub fn add_documents(&mut self, docs: Vec<VectorDocument>) -> Result<()> {
-        let subprocess = self.subprocess.lock().unwrap();
-        
-        for doc in docs {
-            let metadata_json = serde_json::to_string(&doc.metadata)?;
-            let embedding_str = format!("[{}]", 
-                doc.embedding.iter()
-                    .map(|v| v.to_string())
-                    .collect::<Vec<_>>()
-                    .join(",")
-            );
-            
-            subprocess.execute(
-                "INSERT INTO vector_documents 
-                 (id, project_id, document_id, chunk_index, content, embedding, metadata, created_at)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, NOW())
-                 ON DUPLICATE KEY UPDATE 
-                    content = VALUES(content),
-                    embedding = VALUES(embedding),
-                    metadata = VALUES(metadata)",
-                vec![
-                    Value::String(doc.id),
-                    Value::String(doc.project_id),
-                    Value::String(doc.document_id),
-                    Value::Number(doc.chunk_index.into()),
-                    Value::String(doc.content),
-                    Value::String(embedding_str),
-                    Value::String(metadata_json),
-                ],
-            )?;
+
+    /// Add multiple vector documents (batch upsert).
+    pub async fn add_documents(&self, docs: Vec<VectorDocument>) -> Result<()> {
+        if docs.is_empty() {
+            return Ok(());
         }
-        
-        subprocess.commit()?;
-        Ok(())
+        let coll = self
+            .client
+            .get_or_create_collection::<DashScopeEmbeddingFunction>(
+                VECTOR_COLLECTION_NAME,
+                Some(self.hnsw_config.clone()),
+                None,
+            )
+            .await
+            .map_err(seekdb_err)?;
+        let ids: Vec<String> = docs.iter().map(|d| d.id.clone()).collect();
+        let embeddings: Vec<Vec<f32>> =
+            docs.iter().map(|d| embedding_f64_to_f32(&d.embedding)).collect();
+        let metadatas: Vec<Value> = docs.iter().map(doc_to_meta).collect();
+        let contents: Vec<String> = docs.iter().map(|d| d.content.clone()).collect();
+        coll.upsert_batch(
+            UpsertBatch::new(&ids)
+                .embeddings(&embeddings)
+                .metadatas(&metadatas)
+                .documents(&contents),
+        )
+        .await
+        .map_err(seekdb_err)
     }
-    
-    /// Hybrid search using SeekDB's native hybrid search (vector + fulltext)
-    pub fn hybrid_search(
+
+    /// 向量 KNN 检索，可按 project_id 过滤。
+    pub async fn hybrid_search(
         &self,
-        query_text: &str,
+        _query_text: &str,
         query_embedding: &[f64],
         project_id: Option<&str>,
         limit: usize,
-        semantic_boost: f64,
+        _semantic_boost: f64,
     ) -> Result<Vec<SearchResult>> {
-        log::info!("🔍 [HYBRID-SEARCH] 开始混合检索");
-        log::info!("   查询文本: {}", query_text);
-        log::info!("   向量维度: {}", query_embedding.len());
-        log::info!("   项目ID: {:?}", project_id);
-        log::info!("   返回数量: {}", limit);
-        log::info!("   语义权重: {}", semantic_boost);
-        
-        let subprocess = self.subprocess.lock().unwrap();
-        
-        // Convert query embedding to JSON array
-        let embedding_json = format!("[{}]", 
-            query_embedding.iter()
-                .map(|v| v.to_string())
-                .collect::<Vec<_>>()
-                .join(",")
-        );
-        
-        // Build hybrid search query using dbms_hybrid_search.search()
-        // Reference: docs/seekdb.md section 3.3
-        let search_param = if let Some(pid) = project_id {
-            format!(r#"{{
-                "query": {{
-                    "bool": {{
-                        "must": [
-                            {{"match": {{"content": "{}"}}}}
-                        ]
-                    }}
-                }},
-                "knn": {{
-                    "field": "embedding",
-                    "k": {},
-                    "num_candidates": {},
-                    "query_vector": {},
-                    "boost": {}
-                }},
-                "filter": {{
-                    "term": {{"project_id": "{}"}}
-                }},
-                "_source": ["id", "project_id", "document_id", "chunk_index", "content", "metadata", "_keyword_score", "_semantic_score"]
-            }}"#, 
-                query_text.replace('"', "\\\""),
-                limit,
-                limit * 2,
-                embedding_json,
-                semantic_boost,
-                pid
+        log::info!("🔍 [HYBRID-SEARCH] 向量 KNN 检索");
+        let coll = self
+            .client
+            .get_or_create_collection::<DashScopeEmbeddingFunction>(
+                VECTOR_COLLECTION_NAME,
+                Some(self.hnsw_config.clone()),
+                None,
             )
-        } else {
-            format!(r#"{{
-                "query": {{
-                    "bool": {{
-                        "must": [
-                            {{"match": {{"content": "{}"}}}}
-                        ]
-                    }}
-                }},
-                "knn": {{
-                    "field": "embedding",
-                    "k": {},
-                    "num_candidates": {},
-                    "query_vector": {},
-                    "boost": {}
-                }},
-                "_source": ["id", "project_id", "document_id", "chunk_index", "content", "metadata", "_keyword_score", "_semantic_score"]
-            }}"#,
-                query_text.replace('"', "\\\""),
-                limit,
-                limit * 2,
-                embedding_json,
-                semantic_boost
+            .await
+            .map_err(seekdb_err)?;
+        let query_emb = embedding_f64_to_f32(query_embedding);
+        let where_meta = project_id
+            .map(|pid| Filter::Eq { field: "project_id".to_string(), value: json!(pid) });
+        let limit_u = limit as u32;
+        let qr = coll
+            .query_embeddings(
+                &[query_emb],
+                limit_u,
+                where_meta.as_ref(),
+                None,
+                Some(&[IncludeField::Documents, IncludeField::Metadatas]),
             )
-        };
-        
-        log::debug!("混合搜索参数: {}", search_param);
-        
-        // Set the parameter variable
-        subprocess.execute(
-            &format!("SET @search_param = '{}'", search_param.replace('\'', "\\'")),
-            vec![],
-        )?;
-        
-        // Execute hybrid search
-        let rows = subprocess.query(
-            "SELECT dbms_hybrid_search.search('vector_documents', @search_param)",
-            vec![],
-        )?;
-        
-        log::info!("✅ [HYBRID-SEARCH] 混合检索返回 {} 行结果", rows.len());
-        
-        // Parse results
-        let mut results = Vec::new();
-        for row in rows {
-            if row.is_empty() {
-                continue;
-            }
-            
-            // The result is a JSON string
-            let result_json = row[0].as_str().unwrap_or("{}");
-            log::debug!("结果 JSON: {}", result_json);
-            
-            // Parse the JSON result
-            if let Ok(result_obj) = serde_json::from_str::<serde_json::Value>(result_json) {
-                if let Some(hits) = result_obj["hits"]["hits"].as_array() {
-                    for hit in hits {
-                        let source = &hit["_source"];
-                        let id = source["id"].as_str().unwrap_or_default().to_string();
-                        let project_id = source["project_id"].as_str().unwrap_or_default().to_string();
-                        let document_id = source["document_id"].as_str().unwrap_or_default().to_string();
-                        let chunk_index = source["chunk_index"].as_i64().unwrap_or(0) as i32;
-                        let content = source["content"].as_str().unwrap_or_default().to_string();
-                        
-                        // Get scores
-                        let keyword_score = source["_keyword_score"].as_f64().unwrap_or(0.0);
-                        let semantic_score = source["_semantic_score"].as_f64().unwrap_or(0.0);
-                        let total_score = hit["_score"].as_f64().unwrap_or(0.0);
-                        
-                        log::debug!("  文档ID: {}, 关键词分数: {:.4}, 语义分数: {:.4}, 总分: {:.4}",
-                            document_id, keyword_score, semantic_score, total_score);
-                        
-                        // Parse metadata
-                        let metadata_str = source["metadata"].as_str().unwrap_or("{}");
-                        let metadata: HashMap<String, String> = serde_json::from_str(metadata_str).unwrap_or_default();
-                        
-                        // We don't have the embedding in the result, use empty vector
-                        results.push(SearchResult {
-                            document: VectorDocument {
-                                id,
-                                project_id,
-                                document_id,
-                                chunk_index,
-                                content,
-                                embedding: vec![],
-                                metadata,
-                            },
-                            similarity: total_score,
-                        });
-                    }
-                }
-            }
-        }
-        
-        log::info!("✅ [HYBRID-SEARCH] 解析得到 {} 个有效结果", results.len());
-        
+            .await
+            .map_err(seekdb_err)?;
+        let results = query_result_to_search_results(qr, limit);
+        log::info!("✅ [HYBRID-SEARCH] 返回 {} 个结果", results.len());
         Ok(results)
     }
-    
-    /// Vector similarity search using SeekDB's native L2 distance
-    pub fn similarity_search(
+
+    /// 混合检索（关键词+向量）：用 query 文本直接检索，内部对 query 做向量化并执行混合搜索。
+    pub async fn hybrid_search_by_text(
+        &self,
+        embedding_service: Arc<crate::services::dashscope_embedding_service::DashScopeEmbeddingService>,
+        project_id: Option<&str>,
+        query_text: &str,
+        limit: usize,
+    ) -> Result<Vec<SearchResult>> {
+        log::info!("🔍 [HYBRID-BY-TEXT] 混合检索（关键词+向量）");
+        let ef = DashScopeEmbeddingFunction { service: embedding_service };
+        let coll = self
+            .client
+            .get_or_create_collection::<DashScopeEmbeddingFunction>(
+                VECTOR_COLLECTION_NAME,
+                Some(self.hnsw_config.clone()),
+                Some(ef),
+            )
+            .await
+            .map_err(seekdb_err)?;
+        let query_text = query_text.to_string();
+        let where_meta = project_id
+            .map(|pid| Filter::Eq { field: "project_id".to_string(), value: json!(pid) });
+        let limit_u = limit as u32;
+        let knn = HybridKnn {
+            query_texts: Some(vec![query_text]),
+            query_embeddings: None,
+            where_meta,
+            n_results: Some(limit_u),
+        };
+        let qr = coll
+            .hybrid_search_advanced(
+                None,
+                Some(knn),
+                None,
+                limit_u,
+                Some(&[IncludeField::Documents, IncludeField::Metadatas]),
+            )
+            .await
+            .map_err(seekdb_err)?;
+        let results = query_result_to_search_results(qr, limit);
+        log::info!("✅ [HYBRID-BY-TEXT] 返回 {} 个结果", results.len());
+        Ok(results)
+    }
+
+    /// 向量相似度检索（L2 距离），按 threshold 过滤后截断条数。
+    pub async fn similarity_search(
         &self,
         query_embedding: &[f64],
         project_id: Option<&str>,
         limit: usize,
         threshold: f64,
     ) -> Result<Vec<SearchResult>> {
-        let subprocess = self.subprocess.lock().unwrap();
-        
-        // Convert query embedding to SeekDB format
-        let embedding_str = format!("[{}]", 
-            query_embedding.iter()
-                .map(|v| v.to_string())
-                .collect::<Vec<_>>()
-                .join(",")
-        );
-        
-        // Build SQL query with SeekDB's native vector search
-        // Note: We don't SELECT the embedding field because SeekDB doesn't support
-        // fetching vector columns when using vector functions (l2_distance) with APPROXIMATE
-        let sql = if project_id.is_some() {
-            format!(
-                "SELECT id, project_id, document_id, chunk_index, content, metadata,
-                        l2_distance(embedding, '{}') as distance
-                 FROM vector_documents
-                 WHERE project_id = ?
-                 ORDER BY l2_distance(embedding, '{}') APPROXIMATE
-                 LIMIT {}",
-                embedding_str, embedding_str, limit * 2 // Get more to filter by threshold
+        let coll = self
+            .client
+            .get_or_create_collection::<DashScopeEmbeddingFunction>(
+                VECTOR_COLLECTION_NAME,
+                Some(self.hnsw_config.clone()),
+                None,
             )
-        } else {
-            format!(
-                "SELECT id, project_id, document_id, chunk_index, content, metadata,
-                        l2_distance(embedding, '{}') as distance
-                 FROM vector_documents
-                 ORDER BY l2_distance(embedding, '{}') APPROXIMATE
-                 LIMIT {}",
-                embedding_str, embedding_str, limit * 2
+            .await
+            .map_err(seekdb_err)?;
+        let query_emb = embedding_f64_to_f32(query_embedding);
+        let where_meta = project_id
+            .map(|pid| Filter::Eq { field: "project_id".to_string(), value: json!(pid) });
+        let limit_u = (limit * 2).min(1000) as u32;
+        let qr = coll
+            .query_embeddings(
+                &[query_emb],
+                limit_u,
+                where_meta.as_ref(),
+                None,
+                Some(&[IncludeField::Documents, IncludeField::Metadatas]),
             )
-        };
-        
-        let values = if project_id.is_some() {
-            vec![Value::String(project_id.unwrap().to_string())]
-        } else {
-            vec![]
-        };
-        
-        let rows = subprocess.query(&sql, values)?;
-        
-        let mut results = Vec::new();
-        for row in rows {
-            if row.len() < 7 {
-                continue;
-            }
-            
-            let id = row[0].as_str().unwrap_or_default().to_string();
-            let project_id = row[1].as_str().unwrap_or_default().to_string();
-            let document_id = row[2].as_str().unwrap_or_default().to_string();
-            let chunk_index = row[3].as_i64().unwrap_or(0) as i32;
-            let content = row[4].as_str().unwrap_or_default().to_string();
-            
-            // Parse metadata
-            let metadata_str = row[5].as_str().unwrap_or("{}");
-            let metadata: HashMap<String, String> = serde_json::from_str(metadata_str).unwrap_or_default();
-            
-            // Get distance (L2) and convert to similarity (inverse)
-            let distance = row[6].as_f64().unwrap_or(f64::MAX);
-            
-            // Convert L2 distance to cosine similarity approximation
-            // For normalized vectors, cosine similarity ≈ 1 - (L2_distance^2 / 2)
-            // But since we don't know if vectors are normalized, we'll use a simple inverse
-            let similarity = if distance > 0.0 {
-                1.0 / (1.0 + distance)
-            } else {
-                1.0
-            };
-            
-            // Filter by threshold
-            if similarity >= threshold {
-                results.push(SearchResult {
-                    document: VectorDocument {
-                        id,
-                        project_id,
-                        document_id,
-                        chunk_index,
-                        content,
-                        embedding: vec![], // Empty vector - not returned by query for performance
-                        metadata,
-                    },
-                    similarity,
-                });
-            }
-        }
-        
-        // Limit results
+            .await
+            .map_err(seekdb_err)?;
+        let mut results = query_result_to_search_results(qr, limit_u as usize);
+        results.retain(|r| r.similarity >= threshold);
         results.truncate(limit);
-        
         Ok(results)
     }
-    
-    /// Get all documents for a project
-    pub fn get_project_documents(&self, project_id: &str) -> Result<Vec<VectorDocument>> {
-        let subprocess = self.subprocess.lock().unwrap();
-        
-        // Note: SeekDB may not support selecting vector columns in all contexts
-        // We query without embedding field and use empty vectors
-        let rows = subprocess.query(
-            "SELECT id, project_id, document_id, chunk_index, content, metadata
-             FROM vector_documents
-             WHERE project_id = ?",
-            vec![Value::String(project_id.to_string())],
-        )?;
-        
+
+    /// 获取项目下所有向量文档（按 project_id 过滤）。
+    pub async fn get_project_documents(&self, project_id: &str) -> Result<Vec<VectorDocument>> {
+        let coll = self
+            .client
+            .get_or_create_collection::<DashScopeEmbeddingFunction>(
+                VECTOR_COLLECTION_NAME,
+                Some(self.hnsw_config.clone()),
+                None,
+            )
+            .await
+            .map_err(seekdb_err)?;
+        let filter =
+            Filter::Eq { field: "project_id".to_string(), value: json!(project_id) };
+        let get_result = coll
+            .get(
+                None,
+                Some(&filter),
+                None,
+                Some(100_000),
+                Some(0),
+                Some(&[IncludeField::Documents, IncludeField::Metadatas]),
+            )
+            .await
+            .map_err(seekdb_err)?;
+        let ids = get_result.ids;
+        let docs = get_result.documents.unwrap_or_default();
+        let metas = get_result.metadatas.unwrap_or_default();
         let mut documents = Vec::new();
-        for row in rows {
-            if row.len() < 6 {
-                continue;
-            }
-            
-            let id = row[0].as_str().unwrap_or_default().to_string();
-            let project_id = row[1].as_str().unwrap_or_default().to_string();
-            let document_id = row[2].as_str().unwrap_or_default().to_string();
-            let chunk_index = row[3].as_i64().unwrap_or(0) as i32;
-            let content = row[4].as_str().unwrap_or_default().to_string();
-            
-            let metadata_str = row[5].as_str().unwrap_or("{}");
-            let metadata: HashMap<String, String> = serde_json::from_str(metadata_str).unwrap_or_default();
-            
+        for (i, id) in ids.into_iter().enumerate() {
+            let content = docs.get(i).cloned().unwrap_or_default();
+            let meta = metas.get(i).cloned().unwrap_or(json!({}));
+            let project_id_str =
+                meta.get("project_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let document_id =
+                meta.get("document_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let chunk_index =
+                meta.get("chunk_index").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
             documents.push(VectorDocument {
                 id,
-                project_id,
+                project_id: project_id_str,
                 document_id,
                 chunk_index,
                 content,
-                embedding: vec![], // Empty vector - not needed for this query
-                metadata,
+                embedding: vec![],
+                metadata: meta_to_doc_meta(&meta),
             });
         }
-        
-        // Sort documents by document_id and chunk_index in memory
         documents.sort_by(|a, b| {
             match a.document_id.cmp(&b.document_id) {
                 std::cmp::Ordering::Equal => a.chunk_index.cmp(&b.chunk_index),
                 other => other,
             }
         });
-        
         Ok(documents)
     }
-    
-    /// Delete all documents for a project
-    pub fn delete_project_documents(&mut self, project_id: &str) -> Result<usize> {
-        let subprocess = self.subprocess.lock().unwrap();
-        
-        let count = subprocess.execute(
-            "DELETE FROM vector_documents WHERE project_id = ?",
-            vec![Value::String(project_id.to_string())],
-        )?;
-        
-        subprocess.commit()?;
-        Ok(count as usize)
-    }
-    
-    /// Delete a specific document
-    pub fn delete_document(&mut self, document_id: &str) -> Result<usize> {
-        let subprocess = self.subprocess.lock().unwrap();
-        
-        let count = subprocess.execute(
-            "DELETE FROM vector_documents WHERE document_id = ?",
-            vec![Value::String(document_id.to_string())],
-        )?;
-        
-        subprocess.commit()?;
-        Ok(count as usize)
-    }
-    
-    /// Get database statistics
-    pub fn get_stats(&self) -> Result<HashMap<String, i64>> {
-        let subprocess = self.subprocess.lock().unwrap();
-        let mut stats = HashMap::new();
-        
-        // Total documents
-        if let Some(row) = subprocess.query_one("SELECT COUNT(*) FROM vector_documents", vec![])? {
-            if let Some(count) = row[0].as_i64() {
-                stats.insert("total_documents".to_string(), count);
-            }
-        }
-        
-        // Total projects
-        if let Some(row) = subprocess.query_one(
-            "SELECT COUNT(DISTINCT project_id) FROM vector_documents",
-            vec![],
-        )? {
-            if let Some(count) = row[0].as_i64() {
-                stats.insert("total_projects".to_string(), count);
-            }
-        }
-        
-        Ok(stats)
-    }
-    
-    /// Count documents in a project
-    pub fn count_project_documents(&self, project_id: &str) -> Result<usize> {
-        let subprocess = self.subprocess.lock().unwrap();
-        
-        if let Some(row) = subprocess.query_one(
-            "SELECT COUNT(DISTINCT document_id) FROM vector_documents WHERE project_id = ?",
-            vec![Value::String(project_id.to_string())],
-        )? {
-            if let Some(count) = row[0].as_i64() {
-                return Ok(count as usize);
-            }
-        }
-        
+
+    /// 按项目删除向量文档。
+    pub async fn delete_project_documents(&self, project_id: &str) -> Result<usize> {
+        let coll = self
+            .client
+            .get_or_create_collection::<DashScopeEmbeddingFunction>(
+                VECTOR_COLLECTION_NAME,
+                Some(self.hnsw_config.clone()),
+                None,
+            )
+            .await
+            .map_err(seekdb_err)?;
+        let filter =
+            Filter::Eq { field: "project_id".to_string(), value: json!(project_id) };
+        coll.delete_query(DeleteQuery::new().with_where_meta(&filter))
+            .await
+            .map_err(seekdb_err)?;
         Ok(0)
     }
-    
+
+    /// 按 document_id 删除向量文档。
+    pub async fn delete_document(&self, document_id: &str) -> Result<usize> {
+        let coll = self
+            .client
+            .get_or_create_collection::<DashScopeEmbeddingFunction>(
+                VECTOR_COLLECTION_NAME,
+                Some(self.hnsw_config.clone()),
+                None,
+            )
+            .await
+            .map_err(seekdb_err)?;
+        let filter =
+            Filter::Eq { field: "document_id".to_string(), value: json!(document_id) };
+        coll.delete_query(DeleteQuery::new().with_where_meta(&filter))
+            .await
+            .map_err(seekdb_err)?;
+        Ok(0)
+    }
+
+    /// 从查询结果解析整型（兼容 Number 或 String 列）。
+    fn value_as_i64(v: &Value) -> i64 {
+        v.as_i64()
+            .or_else(|| v.as_str().and_then(|s| s.parse::<i64>().ok()))
+            .unwrap_or(0)
+    }
+
+    /// 从查询结果解析浮点（兼容 Number 或 String 列，如 distance）。
+    fn value_as_f64(v: &Value) -> f64 {
+        v.as_f64()
+            .or_else(|| v.as_str().and_then(|s| s.parse::<f64>().ok()))
+            .unwrap_or(f64::MAX)
+    }
+
+    /// 统计：向量总条数 + 项目数（项目数来自 projects 表）。
+    pub async fn get_stats(&self) -> Result<HashMap<String, i64>> {
+        let mut stats = HashMap::new();
+        let coll = self
+            .client
+            .get_or_create_collection::<DashScopeEmbeddingFunction>(
+                VECTOR_COLLECTION_NAME,
+                Some(self.hnsw_config.clone()),
+                None,
+            )
+            .await
+            .map_err(seekdb_err)?;
+        let total_documents = coll.count().await.map_err(seekdb_err)?;
+        stats.insert("total_documents".to_string(), total_documents as i64);
+        if let Some(row) = self.query_one("SELECT COUNT(*) FROM projects", vec![]).await? {
+            stats.insert("total_projects".to_string(), Self::value_as_i64(&row[0]));
+        }
+        Ok(stats)
+    }
+
+    /// 统计指定项目下的向量条数。
+    pub async fn count_project_documents(&self, project_id: &str) -> Result<usize> {
+        let coll = self
+            .client
+            .get_or_create_collection::<DashScopeEmbeddingFunction>(
+                VECTOR_COLLECTION_NAME,
+                Some(self.hnsw_config.clone()),
+                None,
+            )
+            .await
+            .map_err(seekdb_err)?;
+        let filter =
+            Filter::Eq { field: "project_id".to_string(), value: json!(project_id) };
+        let res = coll
+            .get(None, Some(&filter), None, Some(100_000), Some(0), None)
+            .await
+            .map_err(seekdb_err)?;
+        Ok(res.ids.len())
+    }
+
     /// Save project to database
-    pub fn save_project(&mut self, project: &crate::models::project::Project) -> Result<()> {
+    pub async fn save_project(&self, project: &crate::models::project::Project) -> Result<()> {
         log::info!("💾 [SAVE-PROJECT] Saving project: id={}, name={}", project.id, project.name);
-        
-        let subprocess = self.subprocess.lock().unwrap();
-        
-        subprocess.execute(
+
+        self.execute(
             "INSERT INTO projects (id, name, description, status, document_count, created_at, updated_at)
              VALUES (?, ?, ?, ?, ?, ?, ?)
              ON DUPLICATE KEY UPDATE
@@ -687,97 +657,72 @@ impl SeekDbAdapter {
                 Value::String(project.created_at.to_rfc3339()),
                 Value::String(project.updated_at.to_rfc3339()),
             ],
-        )?;
-        
-        subprocess.commit()?;
+        )
+        .await?;
+        self.commit().await?;
         log::info!("💾 [SAVE-PROJECT] Project saved successfully");
         Ok(())
     }
-    
+
     /// Load all projects from database
-    pub fn load_all_projects(&self) -> Result<Vec<crate::models::project::Project>> {
+    pub async fn load_all_projects(&self) -> Result<Vec<crate::models::project::Project>> {
         use chrono::DateTime;
         use uuid::Uuid;
-        
-        let subprocess = self.subprocess.lock().unwrap();
-        
-        // Note: SeekDB/ObLite doesn't support ORDER BY, so we sort in memory
-        let rows = subprocess.query(
+
+        let rows = self.query(
             "SELECT id, name, description, status, document_count, created_at, updated_at
              FROM projects",
             vec![],
-        )?;
-        
+        )
+        .await?;
+
         let mut projects = Vec::new();
         for (idx, row) in rows.iter().enumerate() {
             if row.len() < 7 {
                 log::warn!("跳过项目 #{}: 列数不足 ({})", idx, row.len());
                 continue;
             }
-            
-            // 解析 ID
             let id_str = row[0].as_str().unwrap_or_default();
             if id_str.is_empty() {
-                log::warn!("跳过项目 #{}: ID 为空", idx);
                 continue;
             }
-            
             let id = match Uuid::parse_str(id_str) {
                 Ok(id) => id,
-                Err(e) => {
-                    log::warn!("跳过项目 #{}: ID 解析失败 '{}': {}", idx, id_str, e);
-                    continue;
-                }
+                Err(_) => continue,
             };
-            
             let name = row[1].as_str().unwrap_or_default().to_string();
             let description = row[2].as_str().and_then(|s| {
-                if s.is_empty() { None } else { Some(s.to_string()) }
+                if s.is_empty() {
+                    None
+                } else {
+                    Some(s.to_string())
+                }
             });
-            
             let status_str = row[3].as_str().unwrap_or("Created");
             let status = match status_str {
-                "Created" => crate::models::project::ProjectStatus::Created,
                 "Processing" => crate::models::project::ProjectStatus::Processing,
                 "Ready" => crate::models::project::ProjectStatus::Ready,
                 "Error" => crate::models::project::ProjectStatus::Error,
                 _ => crate::models::project::ProjectStatus::Created,
             };
-            
-            let document_count = row[4].as_i64().unwrap_or(0) as u32;
-            
-            // 解析创建时间 - 添加更好的错误处理
+            let document_count = Self::value_as_i64(&row[4]) as u32;
             let created_at_str = row[5].as_str().unwrap_or_default();
             let created_at = if created_at_str.is_empty() {
-                log::warn!("项目 {} '{}': 创建时间为空，使用当前时间", id, name);
                 chrono::Utc::now()
             } else {
-                match DateTime::parse_from_rfc3339(created_at_str) {
-                    Ok(dt) => dt.with_timezone(&chrono::Utc),
-                    Err(e) => {
-                        log::warn!("项目 {} '{}': 创建时间解析失败 '{}': {}，使用当前时间", 
-                            id, name, created_at_str, e);
-                        chrono::Utc::now()
-                    }
-                }
+                DateTime::parse_from_rfc3339(created_at_str)
+                    .map(|dt| dt.with_timezone(&chrono::Utc))
+                    .unwrap_or_else(|_| chrono::Utc::now())
             };
-            
-            // 解析更新时间 - 添加更好的错误处理
             let updated_at_str = row[6].as_str().unwrap_or_default();
             let updated_at = if updated_at_str.is_empty() {
-                log::warn!("项目 {} '{}': 更新时间为空，使用创建时间", id, name);
                 created_at
             } else {
-                match DateTime::parse_from_rfc3339(updated_at_str) {
-                    Ok(dt) => dt.with_timezone(&chrono::Utc),
-                    Err(e) => {
-                        log::warn!("项目 {} '{}': 更新时间解析失败 '{}': {}，使用创建时间", 
-                            id, name, updated_at_str, e);
-                        created_at
-                    }
-                }
+                DateTime::parse_from_rfc3339(updated_at_str)
+                    .map(|dt| dt.with_timezone(&chrono::Utc))
+                    .unwrap_or(created_at)
             };
-            
+
             projects.push(crate::models::project::Project {
                 id,
                 name,
@@ -788,53 +733,40 @@ impl SeekDbAdapter {
                 updated_at,
             });
         }
-        
-        log::info!("成功加载 {} 个项目", projects.len());
-        
-        // Sort by updated_at DESC in memory
         projects.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
-        
         Ok(projects)
     }
-    
+
     /// Delete project by ID
-    pub fn delete_project_by_id(&mut self, project_id: &str) -> Result<usize> {
-        let subprocess = self.subprocess.lock().unwrap();
-        
-        let count = subprocess.execute(
-            "DELETE FROM projects WHERE id = ?",
-            vec![Value::String(project_id.to_string())],
-        )?;
-        
-        subprocess.commit()?;
-        Ok(count as usize)
+    pub async fn delete_project_by_id(&self, project_id: &str) -> Result<usize> {
+        self.execute("DELETE FROM projects WHERE id = ?", vec![Value::String(project_id.to_string())])
+            .await?;
+        self.commit().await?;
+        Ok(0)
     }
-    
+
     /// Update project document count
-    pub fn update_project_document_count(&mut self, project_id: &str, count: u32) -> Result<()> {
-        let subprocess = self.subprocess.lock().unwrap();
-        
-        subprocess.execute(
+    pub async fn update_project_document_count(&self, project_id: &str, count: u32) -> Result<()> {
+        self.execute(
             "UPDATE projects SET document_count = ?, updated_at = NOW() WHERE id = ?",
             vec![
                 Value::Number((count as i64).into()),
                 Value::String(project_id.to_string()),
             ],
-        )?;
-        
-        subprocess.commit()?;
+        )
+        .await?;
+        self.commit().await?;
         Ok(())
     }
-    
-    // ==================== Conversation Management ====================
-    
+
     /// Save conversation to database
-    pub fn save_conversation(&mut self, conversation: &crate::models::conversation::Conversation) -> Result<()> {
+    pub async fn save_conversation(
+        &self,
+        conversation: &crate::models::conversation::Conversation,
+    ) -> Result<()> {
         log::info!("💾 [SAVE-CONV] Saving conversation: id={}", conversation.id);
-        
-        let subprocess = self.subprocess.lock().unwrap();
-        
-        subprocess.execute(
+
+        self.execute(
             "INSERT INTO conversations (id, project_id, title, created_at, updated_at, message_count)
              VALUES (?, ?, ?, ?, ?, ?)
              ON DUPLICATE KEY UPDATE
@@ -849,99 +781,55 @@ impl SeekDbAdapter {
                 Value::String(conversation.updated_at.to_rfc3339()),
                 Value::Number((conversation.message_count as i64).into()),
             ],
-        )?;
-        
-        subprocess.commit()?;
+        )
+        .await?;
+        self.commit().await?;
         log::info!("💾 [SAVE-CONV] Conversation saved successfully");
         Ok(())
     }
-    
+
     /// Load conversations by project
-    pub fn load_conversations_by_project(
+    pub async fn load_conversations_by_project(
         &self,
         project_id: &str,
     ) -> Result<Vec<crate::models::conversation::Conversation>> {
         use chrono::DateTime;
         use uuid::Uuid;
-        
-        let subprocess = self.subprocess.lock().unwrap();
-        
-        // Note: SeekDB/ObLite doesn't support ORDER BY, so we sort in memory
-        let rows = subprocess.query(
+
+        let rows = self.query(
             "SELECT id, project_id, title, created_at, updated_at, message_count
              FROM conversations
              WHERE project_id = ?",
             vec![Value::String(project_id.to_string())],
-        )?;
-        
+        )
+        .await?;
+
         let mut conversations = Vec::new();
-        for (idx, row) in rows.iter().enumerate() {
+        for row in rows.iter() {
             if row.len() < 6 {
-                log::warn!("跳过对话 #{}: 列数不足 ({})", idx, row.len());
                 continue;
             }
-            
-            // 解析 ID
             let id_str = row[0].as_str().unwrap_or_default();
-            if id_str.is_empty() {
-                log::warn!("跳过对话 #{}: ID 为空", idx);
-                continue;
-            }
-            
             let id = match Uuid::parse_str(id_str) {
                 Ok(id) => id,
-                Err(e) => {
-                    log::warn!("跳过对话 #{}: ID 解析失败 '{}': {}", idx, id_str, e);
-                    continue;
-                }
+                Err(_) => continue,
             };
-            
-            // 解析项目 ID
             let project_id_str = row[1].as_str().unwrap_or_default();
             let project_id = match Uuid::parse_str(project_id_str) {
                 Ok(pid) => pid,
-                Err(e) => {
-                    log::warn!("跳过对话 {}: 项目ID 解析失败 '{}': {}", id, project_id_str, e);
-                    continue;
-                }
+                Err(_) => continue,
             };
-            
             let title = row[2].as_str().unwrap_or_default().to_string();
-            
-            // 解析创建时间
             let created_at_str = row[3].as_str().unwrap_or_default();
-            let created_at = if created_at_str.is_empty() {
-                log::warn!("对话 {} '{}': 创建时间为空，使用当前时间", id, title);
-                chrono::Utc::now()
-            } else {
-                match DateTime::parse_from_rfc3339(created_at_str) {
-                    Ok(dt) => dt.with_timezone(&chrono::Utc),
-                    Err(e) => {
-                        log::warn!("对话 {} '{}': 创建时间解析失败 '{}': {}，使用当前时间", 
-                            id, title, created_at_str, e);
-                        chrono::Utc::now()
-                    }
-                }
-            };
-            
-            // 解析更新时间
+            let created_at = DateTime::parse_from_rfc3339(created_at_str)
+                .map(|dt| dt.with_timezone(&chrono::Utc))
+                .unwrap_or_else(|_| chrono::Utc::now());
             let updated_at_str = row[4].as_str().unwrap_or_default();
-            let updated_at = if updated_at_str.is_empty() {
-                log::warn!("对话 {} '{}': 更新时间为空，使用创建时间", id, title);
-                created_at
-            } else {
-                match DateTime::parse_from_rfc3339(updated_at_str) {
-                    Ok(dt) => dt.with_timezone(&chrono::Utc),
-                    Err(e) => {
-                        log::warn!("对话 {} '{}': 更新时间解析失败 '{}': {}，使用创建时间", 
-                            id, title, updated_at_str, e);
-                        created_at
-                    }
-                }
-            };
-            
-            let message_count = row[5].as_i64().unwrap_or(0) as u32;
-            
+            let updated_at = DateTime::parse_from_rfc3339(updated_at_str)
+                .map(|dt| dt.with_timezone(&chrono::Utc))
+                .unwrap_or(created_at);
+            let message_count = Self::value_as_i64(&row[5]) as u32;
+
             conversations.push(crate::models::conversation::Conversation {
                 id,
                 project_id,
@@ -951,100 +839,48 @@ impl SeekDbAdapter {
                 message_count,
             });
         }
-        
-        // Sort by updated_at DESC in memory
         conversations.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
-        
         Ok(conversations)
     }
-    
+
     /// Load all conversations
-    pub fn load_all_conversations(&self) -> Result<Vec<crate::models::conversation::Conversation>> {
+    pub async fn load_all_conversations(&self) -> Result<Vec<crate::models::conversation::Conversation>> {
         use chrono::DateTime;
         use uuid::Uuid;
-        
-        let subprocess = self.subprocess.lock().unwrap();
-        
-        // Note: SeekDB/ObLite doesn't support ORDER BY, so we sort in memory
-        let rows = subprocess.query(
+
+        let rows = self.query(
             "SELECT id, project_id, title, created_at, updated_at, message_count
              FROM conversations",
             vec![],
-        )?;
-        
+        )
+        .await?;
+
         let mut conversations = Vec::new();
-        for (idx, row) in rows.iter().enumerate() {
+        for row in rows.iter() {
             if row.len() < 6 {
-                log::warn!("跳过对话 #{}: 列数不足 ({})", idx, row.len());
                 continue;
             }
-            
-            // 解析 ID
             let id_str = row[0].as_str().unwrap_or_default();
-            if id_str.is_empty() {
-                log::warn!("跳过对话 #{}: ID 为空", idx);
-                continue;
-            }
-            
             let id = match Uuid::parse_str(id_str) {
                 Ok(id) => id,
-                Err(e) => {
-                    log::warn!("跳过对话 #{}: ID 解析失败 '{}': {}", idx, id_str, e);
-                    continue;
-                }
+                Err(_) => continue,
             };
-            
-            // 解析项目 ID
             let project_id_str = row[1].as_str().unwrap_or_default();
-            if project_id_str.is_empty() {
-                log::warn!("跳过对话 {} : 项目ID 为空", id);
-                continue;
-            }
-            
             let project_id = match Uuid::parse_str(project_id_str) {
                 Ok(pid) => pid,
-                Err(e) => {
-                    log::warn!("跳过对话 {}: 项目ID 解析失败 '{}': {}", id, project_id_str, e);
-                    continue;
-                }
+                Err(_) => continue,
             };
-            
             let title = row[2].as_str().unwrap_or_default().to_string();
-            
-            // 解析创建时间 - 添加更好的错误处理
             let created_at_str = row[3].as_str().unwrap_or_default();
-            let created_at = if created_at_str.is_empty() {
-                log::warn!("对话 {} '{}': 创建时间为空，使用当前时间", id, title);
-                chrono::Utc::now()
-            } else {
-                match DateTime::parse_from_rfc3339(created_at_str) {
-                    Ok(dt) => dt.with_timezone(&chrono::Utc),
-                    Err(e) => {
-                        log::warn!("对话 {} '{}': 创建时间解析失败 '{}': {}，使用当前时间", 
-                            id, title, created_at_str, e);
-                        chrono::Utc::now()
-                    }
-                }
-            };
-            
-            // 解析更新时间 - 添加更好的错误处理
+            let created_at = DateTime::parse_from_rfc3339(created_at_str)
+                .map(|dt| dt.with_timezone(&chrono::Utc))
+                .unwrap_or_else(|_| chrono::Utc::now());
             let updated_at_str = row[4].as_str().unwrap_or_default();
-            let updated_at = if updated_at_str.is_empty() {
-                log::warn!("对话 {} '{}': 更新时间为空，使用创建时间", id, title);
-                created_at
-            } else {
-                match DateTime::parse_from_rfc3339(updated_at_str) {
-                    Ok(dt) => dt.with_timezone(&chrono::Utc),
-                    Err(e) => {
-                        log::warn!("对话 {} '{}': 更新时间解析失败 '{}': {}，使用创建时间", 
-                            id, title, updated_at_str, e);
-                        created_at
-                    }
-                }
-            };
-            
-            let message_count = row[5].as_i64().unwrap_or(0) as u32;
-            
+            let updated_at = DateTime::parse_from_rfc3339(updated_at_str)
+                .map(|dt| dt.with_timezone(&chrono::Utc))
+                .unwrap_or(created_at);
+            let message_count = Self::value_as_i64(&row[5]) as u32;
+
             conversations.push(crate::models::conversation::Conversation {
                 id,
                 project_id,
@@ -1054,66 +890,53 @@ impl SeekDbAdapter {
                 message_count,
             });
         }
-        
-        log::info!("成功加载 {} 个对话", conversations.len());
-        
-        // Sort by updated_at DESC in memory
         conversations.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
-        
         Ok(conversations)
     }
-    
+
     /// Delete conversation by ID
-    pub fn delete_conversation_by_id(&mut self, conversation_id: &str) -> Result<usize> {
-        let subprocess = self.subprocess.lock().unwrap();
-        
-        let count = subprocess.execute(
+    pub async fn delete_conversation_by_id(&self, conversation_id: &str) -> Result<usize> {
+        self.execute(
             "DELETE FROM conversations WHERE id = ?",
             vec![Value::String(conversation_id.to_string())],
-        )?;
-        
-        subprocess.commit()?;
-        Ok(count as usize)
+        )
+        .await?;
+        self.commit().await?;
+        Ok(0)
     }
-    
+
     /// Delete message by ID
-    pub fn delete_message_by_id(&mut self, message_id: &str) -> Result<usize> {
-        let subprocess = self.subprocess.lock().unwrap();
-        
-        let count = subprocess.execute(
+    pub async fn delete_message_by_id(&self, message_id: &str) -> Result<usize> {
+        self.execute(
             "DELETE FROM messages WHERE id = ?",
             vec![Value::String(message_id.to_string())],
-        )?;
-        
-        subprocess.commit()?;
-        Ok(count as usize)
+        )
+        .await?;
+        self.commit().await?;
+        Ok(0)
     }
-    
+
     /// Delete all messages in a conversation
-    pub fn delete_messages_by_conversation(&mut self, conversation_id: &str) -> Result<usize> {
-        let subprocess = self.subprocess.lock().unwrap();
-        
-        let count = subprocess.execute(
+    pub async fn delete_messages_by_conversation(&self, conversation_id: &str) -> Result<usize> {
+        self.execute(
             "DELETE FROM messages WHERE conversation_id = ?",
             vec![Value::String(conversation_id.to_string())],
-        )?;
-        
-        subprocess.commit()?;
-        Ok(count as usize)
+        )
+        .await?;
+        self.commit().await?;
+        Ok(0)
     }
-    
+
     /// Save message to database
-    pub fn save_message(&mut self, message: &crate::models::conversation::Message) -> Result<()> {
+    pub async fn save_message(&self, message: &crate::models::conversation::Message) -> Result<()> {
         log::info!("📝 [SAVE-MSG] Saving message: id={}", message.id);
-        
-        let subprocess = self.subprocess.lock().unwrap();
-        
-        let sources_json = message.sources.as_ref()
-            .map(|s| serde_json::to_string(s).ok())
-            .flatten();
-        
-        // 尝试 INSERT
-        let insert_result = subprocess.execute(
+
+        let sources_json = message
+            .sources
+            .as_ref()
+            .and_then(|s| serde_json::to_string(s).ok());
+
+        let insert_result = self.execute(
             "INSERT INTO messages (id, conversation_id, role, content, created_at, sources)
              VALUES (?, ?, ?, ?, ?, ?)",
             vec![
@@ -1122,156 +945,106 @@ impl SeekDbAdapter {
                 Value::String(message.role.to_string()),
                 Value::String(message.content.clone()),
                 Value::String(message.timestamp.to_rfc3339()),
-                sources_json.clone().map(Value::String).unwrap_or(Value::Null),
+                sources_json
+                    .as_ref()
+                    .map(|s| Value::String(s.clone()))
+                    .unwrap_or(Value::Null),
             ],
-        );
-        
-        // 如果 INSERT 失败（主键冲突），尝试 UPDATE
+        )
+        .await;
+
         match insert_result {
-            Ok(_) => {
-                log::info!("✅ [SAVE-MSG] INSERT 成功");
-            }
+            Ok(()) => {}
             Err(e) => {
                 let error_msg = e.to_string();
                 if error_msg.contains("Duplicated primary key") || error_msg.contains("1062") {
-                    log::info!("💡 [SAVE-MSG] 主键已存在，尝试 UPDATE");
-                    subprocess.execute(
+                    self.execute(
                         "UPDATE messages SET role=?, content=?, created_at=?, sources=? WHERE id=?",
                         vec![
                             Value::String(message.role.to_string()),
                             Value::String(message.content.clone()),
                             Value::String(message.timestamp.to_rfc3339()),
-                            sources_json.map(Value::String).unwrap_or(Value::Null),
+                            sources_json
+                                .map(Value::String)
+                                .unwrap_or(Value::Null),
                             Value::String(message.id.to_string()),
                         ],
-                    )?;
-                    log::info!("✅ [SAVE-MSG] UPDATE 成功");
+                    )
+                    .await?;
                 } else {
-                    log::error!("❌ [SAVE-MSG] INSERT 失败: {}", e);
                     return Err(e);
                 }
             }
         }
-        
-        subprocess.commit()?;
+        self.commit().await?;
         log::info!("📝 [SAVE-MSG] Message saved successfully");
         Ok(())
     }
-    
+
     /// Get message count
-    pub fn get_message_count(&self) -> Result<i32> {
-        let subprocess = self.subprocess.lock().unwrap();
-        
-        if let Some(row) = subprocess.query_one("SELECT COUNT(*) FROM messages", vec![])? {
-            if let Some(count) = row[0].as_i64() {
-                return Ok(count as i32);
-            }
+    pub async fn get_message_count(&self) -> Result<i32> {
+        if let Some(row) = self.query_one("SELECT COUNT(*) FROM messages", vec![]).await? {
+            return Ok(Self::value_as_i64(&row[0]) as i32);
         }
-        
         Ok(0)
     }
-    
+
     /// Get conversation message count
-    pub fn get_conversation_message_count(&self, conversation_id: &str) -> Result<i32> {
-        let subprocess = self.subprocess.lock().unwrap();
-        
-        if let Some(row) = subprocess.query_one(
+    pub async fn get_conversation_message_count(&self, conversation_id: &str) -> Result<i32> {
+        if let Some(row) = self.query_one(
             "SELECT COUNT(*) FROM messages WHERE conversation_id = ?",
             vec![Value::String(conversation_id.to_string())],
-        )? {
-            if let Some(count) = row[0].as_i64() {
-                return Ok(count as i32);
-            }
+        )
+        .await?
+        {
+            return Ok(Self::value_as_i64(&row[0]) as i32);
         }
-        
         Ok(0)
     }
-    
+
     /// Load messages by conversation
-    pub fn load_messages_by_conversation(
+    pub async fn load_messages_by_conversation(
         &self,
         conversation_id: &str,
     ) -> Result<Vec<crate::models::conversation::Message>> {
-        use chrono::DateTime;
         use uuid::Uuid;
-        
-        let subprocess = self.subprocess.lock().unwrap();
-        
-        // Note: SeekDB/ObLite doesn't support ORDER BY, so we sort in memory
-        let rows = subprocess.query(
+
+        let rows = self.query(
             "SELECT id, conversation_id, role, content, created_at, sources
              FROM messages
              WHERE conversation_id = ?",
             vec![Value::String(conversation_id.to_string())],
-        )?;
-        
+        )
+        .await?;
+
         let mut messages = Vec::new();
-        for (idx, row) in rows.iter().enumerate() {
+        for row in rows.iter() {
             if row.len() < 6 {
-                log::warn!("跳过消息 #{}: 列数不足 ({})", idx, row.len());
                 continue;
             }
-            
-            // 解析消息 ID
             let id_str = row[0].as_str().unwrap_or_default();
-            if id_str.is_empty() {
-                log::warn!("跳过消息 #{}: ID 为空", idx);
-                continue;
-            }
-            
             let id = match Uuid::parse_str(id_str) {
                 Ok(id) => id,
-                Err(e) => {
-                    log::warn!("跳过消息 #{}: ID 解析失败 '{}': {}", idx, id_str, e);
-                    continue;
-                }
+                Err(_) => continue,
             };
-            
-            // 解析对话 ID
             let conversation_id_str = row[1].as_str().unwrap_or_default();
             let conversation_id = match Uuid::parse_str(conversation_id_str) {
                 Ok(cid) => cid,
-                Err(e) => {
-                    log::warn!("跳过消息 {}: 对话ID 解析失败 '{}': {}", id, conversation_id_str, e);
-                    continue;
-                }
+                Err(_) => continue,
             };
-            
             let role_str = row[2].as_str().unwrap_or("User");
             let role = match role_str {
-                "User" | "user" => crate::models::conversation::MessageRole::User,
                 "Assistant" | "assistant" => crate::models::conversation::MessageRole::Assistant,
                 "System" | "system" => crate::models::conversation::MessageRole::System,
                 _ => crate::models::conversation::MessageRole::User,
             };
-            
             let content = row[3].as_str().unwrap_or_default().to_string();
-            
-            // 解析创建时间
             let created_at_str = row[4].as_str().unwrap_or_default();
-            let created_at = if created_at_str.is_empty() {
-                log::warn!("消息 {}: 创建时间为空，使用当前时间", id);
-                chrono::Utc::now()
-            } else {
-                match DateTime::parse_from_rfc3339(created_at_str) {
-                    Ok(dt) => dt.with_timezone(&chrono::Utc),
-                    Err(e) => {
-                        log::warn!("消息 {}: 创建时间解析失败 '{}': {}，使用当前时间", 
-                            id, created_at_str, e);
-                        chrono::Utc::now()
-                    }
-                }
-            };
-            
-            let sources = row[5].as_str()
-                .and_then(|s| {
-                    if s.is_empty() {
-                        None
-                    } else {
-                        serde_json::from_str(s).ok()
-                    }
-                });
-            
+            let created_at = parse_datetime_from_db(created_at_str);
+            let sources = row[5]
+                .as_str()
+                .and_then(|s| if s.is_empty() { None } else { serde_json::from_str(s).ok() });
+
             messages.push(crate::models::conversation::Message {
                 id,
                 conversation_id,
@@ -1284,26 +1057,18 @@ impl SeekDbAdapter {
                 sources,
             });
         }
-        
-        // Sort by created_at ASC in memory
-        messages.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
-        
+        messages.sort_by(|a, b| a.timestamp.cmp(&b.timestamp).then_with(|| a.id.cmp(&b.id)));
         Ok(messages)
     }
-    
-    /// Verify database connection by running a simple query
-    pub fn verify_connection(&self) -> Result<()> {
+
+    /// Verify database connection
+    pub async fn verify_connection(&self) -> Result<()> {
         log::info!("🔍 验证 SeekDB 数据库连接...");
-        
-        let subprocess = self.subprocess.lock().unwrap();
-        
-        // Try to execute a simple query
-        match subprocess.query("SELECT 1", vec![]) {
+        match self.query("SELECT 1", vec![]).await {
             Ok(rows) => {
                 if rows.is_empty() || rows[0].is_empty() {
                     return Err(anyhow!("数据库查询返回空结果"));
                 }
-                
                 log::info!("✅ SeekDB 数据库连接正常");
                 Ok(())
             }
@@ -1313,25 +1078,12 @@ impl SeekDbAdapter {
             }
         }
     }
-    
-    /// Health check - ping subprocess and verify connection
-    pub fn health_check(&self) -> Result<()> {
+
+    /// Health check
+    pub async fn health_check(&self) -> Result<()> {
         log::info!("🏥 执行 SeekDB 健康检查...");
-        
-        // Check if subprocess is alive
-        let subprocess = self.subprocess.lock().unwrap();
-        subprocess.ping()
-            .map_err(|e| anyhow!("Python 子进程无响应: {}", e))?;
-        
-        drop(subprocess);
-        
-        // Verify database connection
-        self.verify_connection()?;
-        
+        self.verify_connection().await?;
         log::info!("✅ SeekDB 健康检查通过");
         Ok(())
     }
 }
-
-// No Drop implementation needed - Python subprocess manager handles cleanup
-

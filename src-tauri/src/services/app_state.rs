@@ -7,6 +7,7 @@ use crate::services::{
 use crate::config::{AppConfig, LlmConfig};
 use anyhow::{Result, anyhow};
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::sync::Mutex;
 
 /// 应用全局状态管理
@@ -22,13 +23,12 @@ impl AppState {
         // 初始化各个服务
         let document_service = Arc::new(Mutex::new(DocumentService::new().await?));
 
-        // 获取 document_service 中的 vector_db 引用
         let vector_db = {
             let doc_service = document_service.lock().await;
             doc_service.get_vector_db()
         };
 
-        let project_service = Arc::new(Mutex::new(ProjectService::new(vector_db.clone())));
+        let project_service = Arc::new(Mutex::new(ProjectService::new_async(vector_db.clone()).await?));
         let conversation_service = Arc::new(Mutex::new(ConversationService::new(vector_db).await));
 
         // 初始化 LLM 客户端（从环境变量）
@@ -47,20 +47,16 @@ impl AppState {
     }
 
     pub async fn new_with_config(db_path: &str, app_config: Option<AppConfig>, _model_cache_dir: Option<String>) -> Result<Self> {
-        Self::new_with_full_config(db_path, app_config, _model_cache_dir, None).await
+        Self::new_with_full_config(db_path, app_config, _model_cache_dir).await
     }
 
     pub async fn new_with_full_config(
-        db_path: &str, 
-        app_config: Option<AppConfig>, 
+        db_path: &str,
+        app_config: Option<AppConfig>,
         _model_cache_dir: Option<String>,
-        python_path: Option<&str>
     ) -> Result<Self> {
         log::info!("📦 初始化应用状态...");
         log::info!("  - 数据库路径: {}", db_path);
-        if let Some(py_path) = python_path {
-            log::info!("  - Python 路径: {}", py_path);
-        }
 
         // 从配置文件或环境变量获取 API Key
         let api_key = if let Some(ref config) = app_config {
@@ -71,23 +67,27 @@ impl AppState {
         };
 
         // 获取 embedding base URL（优先使用 embedding 配置，而不是 LLM 配置）
-        let embedding_base_url = app_config.as_ref()
+        let embedding_base_url = app_config
+            .as_ref()
             .and_then(|c| c.embedding.as_ref())
             .and_then(|e| e.base_url.clone());
 
-        // 初始化各个服务，使用指定的数据库路径和 API 配置
+        // 初始化各服务（嵌入式 SeekDB）
+        let t_doc = Instant::now();
         let document_service = Arc::new(Mutex::new(
-            DocumentService::with_full_config(db_path, api_key, embedding_base_url, python_path).await?
+            DocumentService::with_full_config(db_path, api_key, embedding_base_url).await?,
         ));
+        log::info!("📦 DocumentService (含 SeekDB+Embedding) 初始化总耗时: {:?}", t_doc.elapsed());
 
-        // 获取 document_service 中的 vector_db 引用
         let vector_db = {
             let doc_service = document_service.lock().await;
             doc_service.get_vector_db()
         };
 
-        let project_service = Arc::new(Mutex::new(ProjectService::new(vector_db.clone())));
+        let project_service = Arc::new(Mutex::new(ProjectService::new_async(vector_db.clone()).await?));
+        let t_conv = Instant::now();
         let conversation_service = Arc::new(Mutex::new(ConversationService::new(vector_db).await));
+        log::info!("📦 ConversationService 初始化总耗时: {:?}", t_conv.elapsed());
 
         // 初始化 LLM 客户端（使用配置文件的配置）
         let llm_config = app_config.as_ref().map(|c| c.llm.clone());
@@ -165,6 +165,8 @@ impl AppState {
                 true, // 默认启用流式输出
             )
         };
+
+        log::info!("[CHAT] LLM API Key (调试): {}", api_key);
 
         // 确定 Base URL
         let base_url = if let Some(url) = base_url_opt {

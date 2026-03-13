@@ -434,7 +434,7 @@ df -h /
 **解决方法**：
 ```bash
 # 手动安装测试
-~/.local/share/mine-kb/venv/bin/pip install seekdb==0.0.1.dev2 -i https://pypi.tuna.tsinghua.edu.cn/simple/
+~/.local/share/com.mine-kb.app/venv/bin/pip install pyseekdb -i https://pypi.tuna.tsinghua.edu.cn/simple/
 
 # 检查 Python 版本
 python3 --version  # 需要 3.8+
@@ -452,7 +452,7 @@ python3 --version  # 需要 3.8+
 
 - [FIX_STARTUP_HANG.md](./FIX_STARTUP_HANG.md) - 第一版修复
 - [FIX_STARTUP_HANG_V2.md](./FIX_STARTUP_HANG_V2.md) - 第二版修复
-- [SEEKDB_AUTO_INSTALL.md](./SEEKDB_AUTO_INSTALL.md) - SeekDB 安装文档
+- [seekdb.md](./seekdb.md) - SeekDB / pyseekdb 文档
 - [SPLASH_SCREEN.md](./SPLASH_SCREEN.md) - 启动界面设计
 
 ---

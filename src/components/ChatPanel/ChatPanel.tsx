@@ -556,45 +556,35 @@ const ChatPanel: React.FC<ChatPanelProps> = ({ projectId, projectName }) => {
     });
   };
 
-  // 格式化消息时间
+  // 格式化消息时间（精确到秒）
+  const timeOptions: Intl.DateTimeFormatOptions = {
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  };
+
   const formatMessageTime = (timestamp: string): string => {
     const msgDate = new Date(timestamp);
     const now = new Date();
     const diffMs = now.getTime() - msgDate.getTime();
     const diffHours = diffMs / (1000 * 60 * 60);
 
-    // 24小时内，只显示时间
     if (diffHours < 24) {
-      return msgDate.toLocaleTimeString('zh-CN', {
-        hour: '2-digit',
-        minute: '2-digit',
-      });
+      return msgDate.toLocaleTimeString('zh-CN', timeOptions);
     }
 
-    // 判断是否跨年
     const msgYear = msgDate.getFullYear();
     const nowYear = now.getFullYear();
+    const month = String(msgDate.getMonth() + 1).padStart(2, '0');
+    const day = String(msgDate.getDate()).padStart(2, '0');
+    const time = msgDate.toLocaleTimeString('zh-CN', timeOptions);
 
     if (msgYear === nowYear) {
-      // 同年，显示月日时间
-      const month = String(msgDate.getMonth() + 1).padStart(2, '0');
-      const day = String(msgDate.getDate()).padStart(2, '0');
-      const time = msgDate.toLocaleTimeString('zh-CN', {
-        hour: '2-digit',
-        minute: '2-digit',
-      });
       return `${month}-${day} ${time}`;
-    } else {
-      // 跨年，显示年月日时间
-      const year = msgDate.getFullYear();
-      const month = String(msgDate.getMonth() + 1).padStart(2, '0');
-      const day = String(msgDate.getDate()).padStart(2, '0');
-      const time = msgDate.toLocaleTimeString('zh-CN', {
-        hour: '2-digit',
-        minute: '2-digit',
-      });
-      return `${year}-${month}-${day} ${time}`;
     }
+    const year = msgDate.getFullYear();
+    return `${year}-${month}-${day} ${time}`;
   };
 
   // 键盘事件处理
@@ -694,7 +684,7 @@ const ChatPanel: React.FC<ChatPanelProps> = ({ projectId, projectName }) => {
   }
 
   return (
-    <div className="flex-1 flex h-full chat-panel-container">
+    <div className="flex-1 min-w-0 min-h-0 flex h-full chat-panel-container">
       {/* 对话列表侧边栏 */}
       {!isConversationListCollapsed && (
         <div
@@ -809,8 +799,8 @@ const ChatPanel: React.FC<ChatPanelProps> = ({ projectId, projectName }) => {
         />
       )}
 
-      {/* 聊天区域 */}
-      <div className="flex-1 flex flex-col">
+      {/* 聊天区域：min-h-0 让 flex-1 消息区正确占满剩余高度并滚动 */}
+      <div className="flex-1 min-w-0 min-h-0 flex flex-col">
         {/* 头部 */}
         <div className="bg-card border-b border-border dark:border-gray-900 p-4">
           <div className="flex items-center gap-3">
@@ -853,8 +843,8 @@ const ChatPanel: React.FC<ChatPanelProps> = ({ projectId, projectName }) => {
           </div>
         </div>
 
-        {/* 消息列表 */}
-        <div className="flex-1 overflow-y-auto p-4 bg-secondary">
+        {/* 消息列表：min-h-0 使 flex-1 生效，占满剩余高度并在内部滚动 */}
+        <div className="flex-1 min-w-0 min-h-0 overflow-y-auto overflow-x-hidden p-4 bg-secondary">
           {!selectedConversationId ? (
             <div className="h-full flex items-center justify-center text-muted-foreground">
               <div className="text-center">
@@ -890,14 +880,14 @@ const ChatPanel: React.FC<ChatPanelProps> = ({ projectId, projectName }) => {
                   className={`flex flex-col group ${msg.role === 'user' ? 'items-end' : 'items-start'}`}
                 >
                   <div
-                    className={`rounded-lg px-4 py-3 ${
+                    className={`rounded-lg px-4 py-3 min-w-0 max-w-full ${
                       msg.role === 'user'
                         ? 'max-w-[70%] bg-primary text-primary-foreground'
                         : 'max-w-[85%] bg-card border border-border dark:border-gray-900 text-foreground'
                     }`}
                   >
                     {msg?.role === 'assistant' ? (
-                      <div className="prose prose-sm dark:prose-invert max-w-none">
+                      <div className="prose prose-sm dark:prose-invert max-w-none min-w-0 overflow-x-hidden">
                         <ReactMarkdown
                           remarkPlugins={[remarkGfm]}
                           components={{
@@ -905,13 +895,17 @@ const ChatPanel: React.FC<ChatPanelProps> = ({ projectId, projectName }) => {
                               const { children, className, ...rest } = props;
                               const match = /language-(\w+)/.exec(className || '');
                               return match ? (
-                                <SyntaxHighlighter
-                                  style={vscDarkPlus as any}
-                                  language={match[1]}
-                                  PreTag="div"
-                                >
-                                  {String(children).replace(/\n$/, '')}
-                                </SyntaxHighlighter>
+                                <div className="overflow-x-auto max-w-full rounded my-1" style={{ maxWidth: '100%' }}>
+                                  <SyntaxHighlighter
+                                    style={vscDarkPlus as any}
+                                    language={match[1]}
+                                    PreTag="div"
+                                    customStyle={{ margin: 0, whiteSpace: 'pre' }}
+                                    codeTagProps={{ style: { whiteSpace: 'pre' } }}
+                                  >
+                                    {String(children).replace(/\n$/, '')}
+                                  </SyntaxHighlighter>
+                                </div>
                               ) : (
                                 <code className={className} {...rest}>
                                   {children}

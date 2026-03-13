@@ -102,22 +102,14 @@ graph TB
     subgraph "数据层 Data Layer"
         direction TB
         
-        subgraph "SeekDB Adapter - Rust"
-            Adapter[SeekDB 适配器]
+        subgraph "SeekDB - Rust"
+            Adapter[SeekDbAdapter]
+            DB[(Embedded SeekDB<br/>向量数据库)]
+            Tables[关系表]
+            VectorIndex[向量集合 HNSW]
         end
         
-        subgraph "Python Bridge - Subprocess"
-            Bridge[seekdb_bridge.py]
-        end
-        
-        subgraph "SeekDB Database"
-            DB[(SeekDB<br/>向量数据库)]
-            Tables[数据表]
-            VectorIndex[向量索引 HNSW]
-        end
-        
-        Adapter -->|JSON Protocol<br/>stdin/stdout| Bridge
-        Bridge -->|Python API| DB
+        Adapter -->|seekdb-rs<br/>Client| DB
         DB --> Tables
         DB --> VectorIndex
     end
@@ -183,65 +175,44 @@ graph TB
 
 **4. 数据层（Data Layer）** ⭐ 重点
 
-数据层是 MineKB 的核心，采用 **Rust → Python Bridge → SeekDB** 三层架构：
+数据层采用 **Rust 直连嵌入式 SeekDB**，无 Python 依赖：
 
-##### 4.1 SeekDB Adapter（Rust 端）
+##### 4.1 SeekDbAdapter（Rust）
 
 **位置**：`src-tauri/src/services/seekdb_adapter.rs`
 
 **职责**：
-- 管理 Python 子进程的生命周期
-- 构建和发送 JSON 格式的命令
-- 解析 Python 返回的结果
-- 提供类型安全的 Rust API
+- 使用 seekdb-rs 的异步 **Client** 打开并操作嵌入式 SeekDB（`SeekDbAdapter::new_async(path).await`）
+- 关系数据（项目、会话、消息）通过参数化 SQL 读写
+- 向量数据通过 seekdb-rs 的 Collection API（单集合 + metadata 过滤 project_id）做 upsert、KNN、混合检索
 
 **核心方法**：
 ```rust
 pub struct SeekDbAdapter {
-    subprocess: Arc<Mutex<PythonSubprocess>>,
+    client: Client,  // seekdb_rs::Client (async)
+    hnsw_config: HnswConfig,
     db_path: String,
     db_name: String,
 }
 
-// 核心方法
 impl SeekDbAdapter {
-    pub fn new(db_path: &Path) -> Result<Self>;
-    pub async fn init(&self) -> Result<()>;
-    pub async fn execute(&self, sql: &str, values: Vec<Value>) -> Result<()>;
-    pub async fn query(&self, sql: &str, values: Vec<Value>) -> Result<Vec<Row>>;
-    pub async fn upsert_vector_documents(&self, docs: &[VectorDocument]) -> Result<()>;
-    pub async fn search_similar(&self, project_id: &str, query_embedding: &[f64], limit: usize) -> Result<Vec<SearchResult>>;
+    pub async fn new_async<P: AsRef<Path>>(db_path: P) -> Result<Self>;
+    async fn execute(&self, sql: &str, params: Vec<Value>) -> Result<()>;
+    async fn query(&self, sql: &str, params: Vec<Value>) -> Result<Vec<Vec<Value>>>;
+    pub async fn add_document(&self, doc: VectorDocument) -> Result<()>;
+    pub async fn add_documents(&self, docs: Vec<VectorDocument>) -> Result<()>;
+    pub async fn hybrid_search_by_text(&self, embedding_service: Arc<...>, project_id: Option<&str>, query_text: &str, limit: usize) -> Result<Vec<SearchResult>>;
+    pub async fn get_project_documents(&self, project_id: &str) -> Result<Vec<VectorDocument>>;
+    // ...
 }
 ```
 
-##### 4.2 Python Bridge（子进程）
+##### 4.2 Embedded SeekDB
 
-**位置**：`src-tauri/python/seekdb_bridge.py`
+**访问方式**：seekdb-rs 异步 **Client**（async API，内部封装嵌入式 C 库）
 
-**通信协议**：基于 stdin/stdout 的 JSON 行协议（Newline-Delimited JSON）
-
-**命令格式**：
-```json
-{
-  "command": "init",
-  "params": {
-    "db_path": "./mine_kb.db",
-    "db_name": "mine_kb"
-  }
-}
-```
-
-**响应格式**：
-```json
-{
-  "status": "success",
-  "data": { ... }
-}
-```
-
-**支持的命令**：
-- `init`：初始化数据库连接
-- `execute`：执行 SQL（INSERT/UPDATE/DELETE）
+**支持的能力**：
+- `execute` / `fetch_all`：参数化 SQL（INSERT/UPDATE/DELETE/SELECT）
 - `query`：查询数据（SELECT）
 - `query_one`：查询单行
 - `commit`：提交事务
@@ -367,10 +338,10 @@ CREATE INDEX idx_messages_conversation ON messages(conversation_id);
 
 **数据流向**：
 
-1. **写入流程**：Rust Service → Adapter → Python Bridge → SeekDB
-2. **查询流程**：Rust Service → Adapter → Python Bridge → SeekDB → 返回结果
+1. **写入流程**：Rust Service → SeekDbAdapter → seekdb-rs → Embedded SeekDB
+2. **查询流程**：Rust Service → SeekDbAdapter → seekdb-rs → Embedded SeekDB → 返回结果
 3. **向量检索流程**：
-   - Query Embedding → Python Bridge
+   - Query Embedding → SeekDbAdapter（内部调用 seekdb-rs）
    - SeekDB HNSW 索引检索
    - 返回 Top-K 相似文档
 
@@ -385,9 +356,8 @@ sequenceDiagram
     participant Tauri as Tauri Command
     participant DocSvc as DocumentService
     participant EmbedSvc as EmbeddingService
-    participant Adapter as SeekDB Adapter
-    participant Bridge as Python Bridge
-    participant DB as SeekDB
+    participant Adapter as SeekDbAdapter
+    participant DB as Embedded SeekDB
     participant API as 阿里云百炼 API
 
     %% 流程 1: 创建项目
@@ -395,10 +365,8 @@ sequenceDiagram
     User->>UI: 点击"创建项目"
     UI->>Tauri: create_project(name, desc)
     Tauri->>Adapter: execute(INSERT INTO projects...)
-    Adapter->>Bridge: {"command": "execute", "params": {...}}
-    Bridge->>DB: INSERT INTO projects VALUES(...)
-    DB-->>Bridge: OK
-    Bridge-->>Adapter: {"status": "success"}
+    Adapter->>DB: execute(SQL, params)
+    DB-->>Adapter: OK
     Adapter-->>Tauri: Result::Ok(project)
     Tauri-->>UI: ProjectResponse
     UI-->>User: 显示新项目
@@ -420,11 +388,9 @@ sequenceDiagram
             EmbedSvc-->>DocSvc: Vec<f64>
         end
         
-        DocSvc->>Adapter: upsert_vector_documents(chunks)
-        Adapter->>Bridge: {"command": "execute", "params": {...}}
-        Bridge->>DB: INSERT INTO vector_documents VALUES(...)
-        DB-->>Bridge: OK
-        Bridge-->>Adapter: {"status": "success"}
+        DocSvc->>Adapter: add_documents(chunks)
+        Adapter->>DB: collection.upsert_batch(...)
+        DB-->>Adapter: OK
     end
     
     Adapter-->>Tauri: Result::Ok(summary)
@@ -439,11 +405,9 @@ sequenceDiagram
     EmbedSvc->>API: POST /embeddings
     API-->>EmbedSvc: query_embedding[1536]
     
-    Tauri->>Adapter: search_similar(project_id, query_embedding, limit=20)
-    Adapter->>Bridge: {"command": "query", "params": {...}}
-    Bridge->>DB: SELECT ... ORDER BY l2_distance(embedding, [...]) APPROXIMATE LIMIT 20
-    DB-->>Bridge: Top-K 相似文档
-    Bridge-->>Adapter: {"status": "success", "data": [...]}
+    Tauri->>Adapter: hybrid_search_by_text(embedding_svc, project_id, query, limit=20)
+    Adapter->>DB: collection.hybrid_search_advanced(...)
+    DB-->>Adapter: QueryResult
     Adapter-->>Tauri: Vec<SearchResult>
     
     Tauri->>Tauri: 构建 Prompt（query + context）
@@ -456,9 +420,8 @@ sequenceDiagram
     end
     
     Tauri->>Adapter: save_message(conversation_id, role, content)
-    Adapter->>Bridge: {"command": "execute", "params": {...}}
-    Bridge->>DB: INSERT INTO messages VALUES(...)
-    DB-->>Bridge: OK
+    Adapter->>DB: execute(INSERT INTO messages...)
+    DB-->>Adapter: OK
 ```
 
 **数据流图说明**：
@@ -466,14 +429,14 @@ sequenceDiagram
 1. **创建项目流程**
    - 用户输入项目名称和描述
    - Tauri 命令验证参数
-   - 通过 Adapter 和 Bridge 将数据写入 SeekDB
+   - 通过 SeekDbAdapter 将数据写入嵌入式 SeekDB
    - 返回创建成功的项目信息
 
 2. **文档处理流程**
    - 文档上传后进行文本提取（PDF、DOCX 等）
    - 文本分块（默认 500 字符/块，重叠 50 字符）
    - 每个块调用阿里云百炼 API 生成 1536 维向量
-   - 向量和文本一起存储到 SeekDB 的 `vector_documents` 表
+   - 向量和文本一起写入 SeekDB 的向量集合（collection）
    - HNSW 索引自动更新
 
 3. **对话问答流程**
@@ -490,16 +453,18 @@ sequenceDiagram
 
 ### 3.1 环境要求
 
-开发和运行 MineKB 需要以下环境：
+**构建/开发环境**（本地开发或打包时需要）：
 
 | 组件 | 版本要求 | 说明 |
 |-----|---------|------|
 | **操作系统** | Linux / macOS / Windows | 推荐 Ubuntu 20.04+ / macOS 10.15+ / Windows 10+ |
-| **Node.js** | 16.x+ | 用于前端开发，推荐 18.x LTS |
+| **Node.js** | 16.x+ | 前端构建与 Tauri CLI，推荐 18.x LTS |
 | **npm/tnpm** | 对应 Node.js 版本 | 阿里内部推荐使用 tnpm |
-| **Rust** | 1.70+ | Tauri 依赖，推荐 1.75+ |
-| **Python** | 3.8+ | SeekDB 依赖，推荐 3.9+ |
+| **Rust** | 1.70+ | Tauri 编译，推荐 1.75+ |
+| **（无 Python）** | - | 数据层使用 seekdb-rs，无需 Python |
 | **系统依赖** | 根据平台 | 见下方说明 |
+
+**安装后运行环境**（用户机器）：无需 Python；Tauri 打包后为单一可执行（或平台包），依赖已内嵌。
 
 #### Linux (Ubuntu/Debian) 系统依赖
 
@@ -513,9 +478,7 @@ sudo apt install -y \
     libssl-dev \
     libgtk-3-dev \
     libayatana-appindicator3-dev \
-    librsvg2-dev \
-    python3-pip \
-    python3-venv
+    librsvg2-dev
 ```
 
 #### macOS 系统依赖
@@ -527,15 +490,14 @@ xcode-select --install
 # 安装 Homebrew（如果尚未安装）
 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
 
-# 安装 Python
-brew install python@3.9
+# （无需安装 Python）
 ```
 
 #### Windows 系统依赖
 
 - Visual Studio 2019 或更高版本（包含 C++ 工具）
 - 或 Visual Studio Build Tools
-- Python 3.8+ from [python.org](https://www.python.org/downloads/)
+- （无需 Python）
 
 ### 3.2 技术栈和依赖包
 
@@ -616,21 +578,9 @@ sha2 = "0.10"
 - `pdf-extract`、`docx-rs`：文档解析
 - Rust 标准库：向量计算和数学运算
 
-#### Python 依赖（requirements.txt）
+#### Rust 依赖（seekdb-rs）
 
-```txt
-seekdb==0.0.1.dev4
-```
-
-**SeekDB 安装**：
-
-```bash
-# 使用清华镜像源
-pip install seekdb==0.0.1.dev4 -i https://pypi.tuna.tsinghua.edu.cn/simple/
-
-# 验证安装
-python3 -c "import seekdb; print('SeekDB installed successfully')"
-```
+seekdb-rs 为 path 依赖（`src-tauri/Cargo.toml`），启用 features：`embedded`、`sync`。构建时自动拉取，无需单独安装。
 
 ### 3.3 API 配置
 
@@ -681,12 +631,7 @@ npm install
 # 或使用 tnpm（阿里内部）
 tnpm install
 
-# 安装 Python 依赖
-pip install seekdb==0.0.1.dev4 -i https://pypi.tuna.tsinghua.edu.cn/simple/
-# 或使用安装脚本
-bash src-tauri/python/install_deps.sh
-
-# Rust 依赖会在编译时自动下载
+# Rust 依赖（含 seekdb-rs）会在编译时自动下载
 ```
 
 #### 2. 配置 API Key
@@ -702,11 +647,14 @@ nano src-tauri/config.json
 #### 3. 启动开发服务器
 
 ```bash
-# 启动 Tauri 开发模式
+# 启动 Tauri 开发模式（默认 CONFIG_DIR=com.mine-kb，数据目录为 src-tauri/com.mine-kb）
 npm run tauri:dev
 
 # 或使用 tnpm
 tnpm run tauri:dev
+
+# 自定义数据目录时可设置 CONFIG_DIR
+CONFIG_DIR=/path/to/your/data tnpm run tauri:dev
 ```
 
 **预期输出**：
@@ -715,13 +663,12 @@ tnpm run tauri:dev
    Compiling mine-kb v0.1.0 (/path/to/mine-kb/src-tauri)
     Finished dev [unoptimized + debuginfo] target(s) in 45.23s
      Running `target/debug/mine-kb`
-[2025-11-05T10:00:00Z INFO  mine_kb] 🚀 MineKB 启动中...
-[2025-11-05T10:00:00Z INFO  mine_kb] 📁 应用数据目录: /home/user/.local/share/com.mine-kb.app
-[2025-11-05T10:00:00Z INFO  mine_kb] 🐍 正在检查 Python 环境...
-[2025-11-05T10:00:01Z INFO  mine_kb] ✅ Python 环境准备完成
-[2025-11-05T10:00:01Z INFO  mine_kb] 🗄️ 正在初始化 SeekDB...
-[2025-11-05T10:00:02Z INFO  mine_kb] ✅ SeekDB 初始化成功
-[2025-11-05T10:00:02Z INFO  mine_kb] 🎉 MineKB 启动成功！
+[INFO  mine_kb] 🚀 MineKB 启动中...
+[INFO  mine_kb] 使用 CONFIG_DIR 指定数据目录
+[INFO  mine_kb] 🔗 [NEW-DB] Opening embedded SeekDB: ...
+[INFO  mine_kb] 🔗 [NEW-DB] Database ready
+[INFO  mine_kb] ✅ SeekDB 初始化成功
+[INFO  mine_kb] 🎉 MineKB 启动成功！
 ```
 
 #### 4. 构建生产版本（可选）
@@ -763,27 +710,15 @@ fn main() {
     let config = load_config(&config_path)
         .expect("无法加载配置文件");
     
-    // 4. 初始化 Python 环境
-    log::info!("🐍 正在检查 Python 环境...");
-    let python_env = PythonEnv::new(&app_data_dir)
-        .expect("Python 环境初始化失败");
-    python_env.ensure_seekdb_installed()
-        .expect("SeekDB 安装失败");
-    log::info!("✅ Python 环境准备完成");
-    
-    // 5. 初始化 SeekDB
+    // 4. 初始化 SeekDB（seekdb-rs 嵌入式客户端，无 Python）
     log::info!("🗄️ 正在初始化 SeekDB...");
     let db_path = app_data_dir.join(&config.database.path);
-    let seekdb_adapter = SeekDbAdapter::new(&db_path)
+    let seekdb_adapter = SeekDbAdapter::new_async(&db_path).await
         .expect("SeekDB 适配器创建失败");
-    
-    // 6. 初始化数据库架构
-    seekdb_adapter.init()
-        .await
-        .expect("数据库初始化失败");
+    // 表结构在 SeekDbAdapter::new_async 内通过 initialize_schema().await 完成
     log::info!("✅ SeekDB 初始化成功");
     
-    // 7. 创建应用状态
+    // 7. 创建应用状态（实际代码中通过 DocumentService::with_full_config().await 创建 adapter，再构建 AppState）
     let app_state = AppState::new(seekdb_adapter, config);
     let app_state_wrapper = AppStateWrapper::new(app_state);
     
@@ -811,41 +746,25 @@ fn main() {
    - 输出到 stderr，便于调试
 
 2. **应用数据目录确定**
-   - macOS: `~/Library/Application Support/com.mine-kb.app/`
-   - Linux: `~/.local/share/com.mine-kb.app/`
-   - Windows: `%APPDATA%\com.mine-kb.app\`
+   - 若设置了环境变量 `CONFIG_DIR`，则以其值为数据根目录（本地开发默认 `CONFIG_DIR=com.mine-kb`，即 `src-tauri/com.mine-kb`）。
+   - 否则：macOS: `~/Library/Application Support/com.mine-kb.app/`；Linux: `~/.local/share/com.mine-kb.app/`；Windows: `%APPDATA%\com.mine-kb.app\`。
 
 3. **配置文件加载**
    - 首次运行时，从 `config.example.json` 复制
    - 读取 API Key、数据库路径等配置
 
-4. **Python 环境准备**
-   - 检查是否存在虚拟环境 `venv/`
-   - 如果不存在，创建虚拟环境
-   - 安装 `seekdb==0.0.1.dev4`
-   - 验证安装成功
+4. **SeekDB 初始化**
+   - 使用 seekdb-rs 的异步 **Client** 打开嵌入式数据库（路径为应用数据目录下的 `mine_kb.db` 等）
+   - `SeekDbAdapter::new_async(path).await` 内会执行 `initialize_schema().await`：创建 `projects`、`conversations`、`messages` 表；向量数据使用 Collection 存储，不建 `vector_documents` 表
 
-5. **SeekDB 初始化**
-   - 启动 Python 子进程（`seekdb_bridge.py`）
-   - 打开数据库实例（`oblite.open(db_path)`）
-   - 连接空字符串创建管理连接
-   - 执行 `CREATE DATABASE IF NOT EXISTS mine_kb`
-   - 切换到 `mine_kb` 数据库
-
-6. **数据库架构创建**
-   - 检查表是否存在
-   - 创建 `projects`、`documents`、`vector_documents`、`conversations`、`messages` 表
-   - 创建向量索引（HNSW）
-   - 创建普通索引
-
-7. **应用状态管理**
+5. **应用状态管理**
    - 创建全局 `AppState`，包含：
      - SeekDB Adapter
      - 配置信息
      - 服务实例（ProjectService、DocumentService 等）
    - 使用 `Arc<Mutex<>>` 实现线程安全的状态共享
 
-8. **Tauri 应用启动**
+6. **Tauri 应用启动**
    - 注册所有 Tauri 命令
    - 启动 WebView
    - 加载前端界面
@@ -1005,30 +924,16 @@ impl ProjectService {
 }
 ```
 
-#### 数据库层（seekdb_adapter.rs → Python Bridge → SeekDB）
+#### 数据库层（seekdb_adapter.rs → seekdb-rs → Embedded SeekDB）
 
-```python
-# Python Bridge 接收命令
-{
-  "command": "execute",
-  "params": {
-    "sql": "INSERT INTO projects (...) VALUES (?, ?, ?, ?, ?, ?, ?)",
-    "values": ["uuid-here", "我的项目", "描述", "active", 0, "2025-11-05T...", "2025-11-05T..."]
-  }
-}
+SeekDbAdapter 通过 seekdb-rs 的异步 **Client** 执行参数化 SQL，例如：
 
-# 转换为 SeekDB SQL
-cursor.execute("""
-    INSERT INTO projects (id, name, description, status, document_count, created_at, updated_at)
-    VALUES ('uuid-here', '我的项目', '描述', 'active', 0, '2025-11-05T...', '2025-11-05T...')
-""")
-conn.commit()
-
-# 返回成功响应
-{
-  "status": "success",
-  "data": null
-}
+```rust
+self.execute(
+    "INSERT INTO projects (id, name, ...) VALUES (?, ?, ...) ON DUPLICATE KEY UPDATE ...",
+    vec![Value::String(project.id.to_string()), Value::String(project.name.clone()), ...],
+).await?;
+self.commit().await?;
 ```
 
 **总结：创建知识库做了什么**
@@ -1420,7 +1325,7 @@ impl LlmClient {
 
 **优势**：
 - ✅ 用户无需任何数据库知识
-- ✅ 安装包自包含（除 Python 依赖外）
+- ✅ 安装包自包含（无 Python 依赖）
 - ✅ 首次启动自动初始化
 - ✅ 跨平台一致的安装体验
 
@@ -1458,7 +1363,7 @@ SeekDB 的 All-in-One 能力为未来扩展提供了无限可能：
 **关键成功因素**：
 1. **SeekDB** 提供了强大的向量检索能力
 2. **Tauri** 提供了轻量级的跨平台桌面应用框架
-3. **Python Bridge** 实现了 Rust 和 SeekDB 的无缝集成
+3. **seekdb-rs** 实现了 Rust 直连嵌入式 SeekDB
 4. **RAG 架构** 充分发挥了向量检索的优势
 
 **适用场景**：
@@ -1516,7 +1421,7 @@ LIMIT 20  -- 不要返回过多结果
 
 #### 应用架构
 
-1. **使用 Python 子进程隔离 SeekDB**
+1. **使用 seekdb-rs 嵌入式客户端直连 SeekDB**
    - 避免 Rust FFI 的复杂性
    - JSON 协议简单可靠
    - 便于调试和错误处理
@@ -1565,9 +1470,7 @@ MineKB 项目的成功验证了 SeekDB 在桌面应用领域的巨大潜力。�
 ### A. 相关资源
 
 - **项目地址**：https://github.com/ob-labs/mine-kb
-- **SeekDB 文档**：[docs/SEEKDB_USAGE_GUIDE.md](SEEKDB_USAGE_GUIDE.md)
-- **迁移指南**：[docs/MIGRATION_SEEKDB.md](MIGRATION_SEEKDB.md)
-- **升级指南**：[docs/UPGRADE_SEEKDB_0.0.1.dev4.md](UPGRADE_SEEKDB_0.0.1.dev4.md)
+- **SeekDB / seekdb-rs 文档**：[docs/seekdb.md](seekdb.md)
 
 ### B. 技术栈链接
 

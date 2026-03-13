@@ -253,7 +253,7 @@ pub async fn send_message(
         let document_service = state.document_service();
         let document_service_guard = document_service.lock().await;
 
-        match document_service_guard.search_similar_chunks(&project_id.to_string(), &request.content, 5).await {
+        match document_service_guard.search_similar_chunks_for_chat(&project_id.to_string(), &request.content, 5).await {
             Ok(chunks) => {
                 log::info!("✅ [CHAT] SeekDB向量检索成功，找到 {} 个相关文档块", chunks.len());
                 
@@ -430,8 +430,9 @@ pub async fn send_message(
             let document_service = state.document_service();
             let doc_service_guard = document_service.lock().await;
             let db = doc_service_guard.get_vector_db();
-            let mut db_guard = db.lock().await;
-            db_guard.save_message(&message_clone)
+            let adapter = db.lock().await.clone();
+            adapter.save_message(&message_clone)
+                .await
                 .map_err(|e| {
                     log::error!("❌ [CHAT] 更新消息 sources 失败: {}", e);
                     format!("更新消息 sources 失败: {}", e)

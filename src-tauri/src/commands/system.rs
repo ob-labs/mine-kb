@@ -1,8 +1,12 @@
 use serde::{Deserialize, Serialize};
 use tauri::command;
+use tauri::State;
 use tauri::api::dialog::blocking::FileDialogBuilder;
 use std::path::Path;
 use std::fs;
+use std::io::Write;
+use base64::Engine;
+use crate::AppDataDirPath;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct AppStatusResponse {
@@ -26,6 +30,47 @@ pub struct FileInfo {
     pub path: String,
     pub name: String,
     pub size: u64,
+}
+
+/// 返回当前使用的应用数据目录（与后端一致；前端用于 temp 等路径）
+#[command]
+pub fn get_app_data_dir(app_data_dir: State<'_, AppDataDirPath>) -> Result<String, String> {
+    Ok(app_data_dir.0.clone())
+}
+
+/// 请求体：前端使用 camelCase（contentBase64），用 serde 对齐
+#[derive(Debug, Deserialize)]
+pub struct SaveFileToAppTmpArgs {
+    pub filename: String,
+    #[serde(rename = "contentBase64")]
+    pub content_base64: String,
+}
+
+/// 将文件内容写入应用数据目录下的 tmp，避免前端 fs scope 限制（开发时 CONFIG_DIR 与 $APPDATA 不一致）。
+/// 返回写入后的绝对路径。
+#[command]
+pub fn save_file_to_app_tmp(
+    app_data_dir: State<'_, AppDataDirPath>,
+    args: SaveFileToAppTmpArgs,
+) -> Result<String, String> {
+    if args.filename.contains("..") || args.filename.contains('/') || args.filename.contains('\\') {
+        return Err("filename must not contain path segments".to_string());
+    }
+    let tmp_dir = Path::new(&app_data_dir.0).join("tmp");
+    if !tmp_dir.exists() {
+        fs::create_dir_all(&tmp_dir).map_err(|e| e.to_string())?;
+    }
+    let file_path = tmp_dir.join(&args.filename);
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(&args.content_base64)
+        .map_err(|e| format!("base64 decode: {}", e))?;
+    let mut f = fs::File::create(&file_path).map_err(|e| e.to_string())?;
+    f.write_all(&bytes).map_err(|e| e.to_string())?;
+    f.sync_all().map_err(|e| e.to_string())?;
+    file_path
+        .into_os_string()
+        .into_string()
+        .map_err(|_| "path not UTF-8".to_string())
 }
 
 #[command]

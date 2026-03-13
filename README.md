@@ -46,7 +46,7 @@ MineKB employs a RAG (Retrieval-Augmented Generation) architecture, combining ve
    - Generation of document embeddings using Alibaba Cloud Bailian API
 
 2. **Vector Storage**
-   - SeekDB 0.0.1.dev4 as an embedded vector database (accessed via Python subprocess)
+   - [seekdb-rs](https://github.com/ob-labs/seekdb-rs) embedded vector database (Rust native, no Python)
    - Native support for vector types and HNSW indexing for efficient vector retrieval
    - Project-level data isolation and transaction support
    - Vector column output and database existence validation
@@ -106,14 +106,12 @@ MineKB employs a RAG (Retrieval-Augmented Generation) architecture, combining ve
   - `@tauri-apps/api 1.5` - Frontend API library
   - `@tauri-apps/cli 1.5` - Command-line tools
   - Enabled features: `path-all`, `http-all`, `dialog-all`, `fs-all`, `shell-open`
-- **Python 3.8+** - SeekDB database operations (via subprocess communication)
 
 **Database**
-- **SeekDB 0.0.1.dev4** (Python) - AI-Native embedded vector database
+- **seekdb-rs** (Rust) - AI-Native embedded vector database, no Python dependency
   - Native support for vector types and HNSW indexing
   - Hybrid search and full-text search support
   - High-performance vector similarity computation
-  - Communication with Rust via JSON-RPC protocol
 
 ### Rust Core Dependencies
 
@@ -122,8 +120,7 @@ MineKB employs a RAG (Retrieval-Augmented Generation) architecture, combining ve
 - `docx-rs 0.4` - Word document processing
 
 **Data Storage**
-- `seekdb 0.0.1.dev4` (Python) - AI-Native embedded database with native vector indexing and HNSW retrieval
-- JSON communication protocol - Rust to Python subprocess communication
+- `seekdb-rs` (Rust) - AI-Native embedded database with native vector indexing and HNSW retrieval, no Python
 
 **Vector Computation**
 - SeekDB native vector indexing (HNSW) - Efficient vector similarity search
@@ -166,17 +163,79 @@ MineKB employs a RAG (Retrieval-Augmented Generation) architecture, combining ve
 ## System Architecture
 
 ### Architecture Overview
-<img src="https://mdn.alipayobjects.com/huamei_ytl0i7/afts/img/A*wk6ST4g16wYAAAAAgFAAAAgAejCYAQ/original">
+
+```mermaid
+graph TB
+    subgraph Frontend["Frontend Layer"]
+        UI[React UI Components]
+        State[State Management]
+    end
+
+    subgraph Command["Command Layer (Tauri)"]
+        CMD_Project[Project Commands]
+        CMD_Doc[Document Commands]
+        CMD_Chat[Conversation Commands]
+        CMD_Speech[Speech Commands]
+    end
+
+    subgraph Service["Service Layer (Rust)"]
+        SVC_Project[ProjectService]
+        SVC_Doc[DocumentService]
+        SVC_Conv[ConversationService]
+        SVC_Embed[EmbeddingService]
+        SVC_LLM[LLMClient]
+        SVC_Speech[SpeechService]
+    end
+
+    subgraph Data["Data Layer"]
+        Adapter[SeekDbAdapter]
+        Client[seekdb-rs Client]
+        DB[(Embedded SeekDB)]
+        Tables[Relational Tables]
+        VectorColl[Vector Collection + HNSW]
+    end
+
+    subgraph External["External Services"]
+        DashScope[Aliyun Bailian API<br/>Embedding + LLM]
+    end
+
+    UI --> Command
+    State --> Command
+    CMD_Project --> SVC_Project
+    CMD_Doc --> SVC_Doc
+    CMD_Chat --> SVC_Conv
+    CMD_Speech --> SVC_Speech
+
+    SVC_Doc --> SVC_Embed
+    SVC_Conv --> SVC_LLM
+    SVC_Project --> Adapter
+    SVC_Doc --> Adapter
+    SVC_Conv --> Adapter
+
+    Adapter --> Client
+    Client --> DB
+    DB --> Tables
+    DB --> VectorColl
+
+    SVC_Embed --> DashScope
+    SVC_LLM --> DashScope
+```
+
+- **Frontend**: React + TypeScript; state and UI.
+- **Command Layer**: Tauri commands (project, document, conversation, speech) bridge frontend and Rust services.
+- **Service Layer**: ProjectService, DocumentService, ConversationService, EmbeddingService, LLMClient, SpeechService.
+- **Data Layer**: SeekDbAdapter uses **seekdb-rs** async Client to talk to embedded SeekDB (SQL + vector collection); no Python.
+- **External**: Aliyun Bailian API for embeddings and LLM.
 
 ## Quick Start
 
 ### Requirements
 
-- Node.js 16+
-- Rust 1.70+
-- Python 3.8+
+**Build / development environment** (for local dev or packaging):
 
-> **Note**: SeekDB currently only releases Linux builds. macOS support is coming soon. macOS users are recommended to use [UTM](https://mac.getutm.app) virtual machine manager to run [Ubuntu 20.x or later](https://mac.getutm.app/gallery/ubuntu-20-04).
+- Node.js 16+ (frontend and Tauri CLI)
+- Rust 1.70+ (Tauri backend)
+- No Python required (seekdb-rs is Rust-native)
 
 ### Install Dependencies
 
@@ -184,7 +243,7 @@ MineKB employs a RAG (Retrieval-Augmented Generation) architecture, combining ve
 # Install frontend dependencies
 npm install
 
-# Rust and Python dependencies are automatically installed during build
+# Rust dependencies are resolved at build time
 ```
 
 ### Configuration
@@ -201,6 +260,9 @@ cp src-tauri/config.example.json src-tauri/config.json
 ```bash
 # Start development server
 tnpm run tauri:dev
+
+# 自定义数据目录时可设置环境变量 CONFIG_DIR
+CONFIG_DIR=/path/to/your/data tnpm run tauri:dev
 ```
 
 ### Build Application
@@ -234,7 +296,7 @@ cd src-tauri && cargo test
 - ✅ **HNSW Indexing**: Professional vector indexing algorithm for faster and more accurate retrieval
 - ✅ **AI-Native Features**: Built-in full-text search, hybrid search, and other AI capabilities
 - ✅ **Better Scalability**: Supports larger datasets and more complex queries
-- ✅ **Latest Version Features** (0.0.1.dev4): Vector column output, database validation, stable USE statement support
+- ✅ **seekdb-rs** (Rust): Embedded client, no Python dependency, vector column output and database validation
 
 ---
 

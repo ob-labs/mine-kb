@@ -15,7 +15,14 @@
       "all": false,
       "fs": {
         "all": true,
-        "scope": ["$APPDATA", "$APPDATA/**", "$HOME/mine-kb-data", "$HOME/mine-kb-data/**"]
+        "scope": [
+          "$APPDATA",
+          "$APPDATA/**",
+          "$APPDATA/tmp",
+          "$APPDATA/tmp/**",
+          "$HOME/mine-kb-data",
+          "$HOME/mine-kb-data/**"
+        ]
       },
       "path": {
         "all": true
@@ -34,7 +41,9 @@
     },
     "bundle": {
       "active": true,
-      "targets": "all",
+      "targets": [
+        "app"
+      ],
       "identifier": "com.mine-kb.app",
       "icon": [
         "icons/32x32.png",
@@ -52,7 +61,10 @@
         "license": null,
         "providerShortName": null
       },
-      "resources": ["config.example.json", "config.json"]
+      "resources": [
+        "config.example.json",
+        "config.json"
+      ]
     },
     "security": {
       "csp": null
@@ -64,8 +76,8 @@
         "title": "MineKB",
         "width": 1200,
         "height": 800,
-        "minWidth": 800,
-        "minHeight": 600
+        "minWidth": 960,
+        "minHeight": 640
       }
     ]
   }

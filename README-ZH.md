@@ -24,7 +24,7 @@ MineKB 是一个基于 Tauri 构建的跨平台桌面应用，旨在帮助用户
 - **向量搜索**：利用语义搜索技术，快速定位相关文档内容
 - **流式输出**：实时流式展示 AI 生成的回答，提供流畅的用户体验
 - **语音交互**：支持语音输入功能，让知识查询更便捷
-- **本地存储**：所有数据存储在本地嵌入式数据库中，保护隐私安
+- **本地存储**：所有数据存储在本地嵌入式数据库中，保护隐私安全
 
 ## 基本原理
 
@@ -46,7 +46,7 @@ MineKB 采用 RAG（Retrieval-Augmented Generation）架构，结合向量检索
    - 使用阿里云百炼 API 生成文档的向量表示（Embeddings）
 
 2. **向量存储**
-   - 使用 SeekDB 0.0.1.dev4 作为嵌入式向量数据库（通过 Python 子进程访问）
+   - 使用 [seekdb-rs](https://github.com/ob-labs/seekdb-rs) 嵌入式向量数据库（Rust 原生，无 Python 依赖）
    - 原生支持向量类型和 HNSW 索引，实现高效的向量检索
    - 支持项目级别的数据隔离和事务处理
    - 支持向量列输出和数据库存在性验证
@@ -106,14 +106,12 @@ MineKB 采用 RAG（Retrieval-Augmented Generation）架构，结合向量检索
   - `@tauri-apps/api 1.5` - 前端 API 调用库
   - `@tauri-apps/cli 1.5` - 命令行工具
   - 启用功能：`path-all`、`http-all`、`dialog-all`、`fs-all`、`shell-open`
-- **Python 3.8+** - SeekDB 数据库操作（通过子进程通信）
 
 **数据库**
-- **SeekDB 0.0.1.dev4** (Python) - AI-Native 嵌入式向量数据库
+- **seekdb-rs** (Rust) - AI-Native 嵌入式向量数据库，无 Python 依赖
   - 原生支持向量类型和 HNSW 索引
   - 支持混合检索和全文搜索
   - 高性能向量相似度计算
-  - 通过 JSON-RPC 协议与 Rust 通信
 
 ### Rust 核心依赖
 
@@ -122,8 +120,7 @@ MineKB 采用 RAG（Retrieval-Augmented Generation）架构，结合向量检索
 - `docx-rs 0.4` - Word 文档处理
 
 **数据存储**
-- `seekdb 0.0.1.dev4` (Python) - AI-Native 嵌入式数据库，原生支持向量索引和 HNSW 检索
-- JSON 通信协议 - Rust 与 Python 子进程通信
+- `seekdb-rs` (Rust) - AI-Native 嵌入式数据库，原生支持向量索引和 HNSW 检索，无 Python
 
 **向量计算**
 - SeekDB 原生向量索引 (HNSW) - 高效向量相似度搜索
@@ -166,17 +163,79 @@ MineKB 采用 RAG（Retrieval-Augmented Generation）架构，结合向量检索
 ## 系统架构
 
 ### 架构概览
-<img src="https://mdn.alipayobjects.com/huamei_ytl0i7/afts/img/A*Cuf4RoPSfwMAAAAAT-AAAAgAejCYAQ/original">
+
+```mermaid
+graph TB
+    subgraph Frontend["前端层"]
+        UI[React UI 组件]
+        State[状态管理]
+    end
+
+    subgraph Command["命令层 (Tauri)"]
+        CMD_Project[项目命令]
+        CMD_Doc[文档命令]
+        CMD_Chat[对话命令]
+        CMD_Speech[语音命令]
+    end
+
+    subgraph Service["服务层 (Rust)"]
+        SVC_Project[ProjectService]
+        SVC_Doc[DocumentService]
+        SVC_Conv[ConversationService]
+        SVC_Embed[EmbeddingService]
+        SVC_LLM[LLMClient]
+        SVC_Speech[SpeechService]
+    end
+
+    subgraph Data["数据层"]
+        Adapter[SeekDbAdapter]
+        Client[seekdb-rs Client]
+        DB[(嵌入式 SeekDB)]
+        Tables[关系表]
+        VectorColl[向量集合 + HNSW]
+    end
+
+    subgraph External["外部服务"]
+        DashScope[阿里云百炼 API<br/>Embedding + LLM]
+    end
+
+    UI --> Command
+    State --> Command
+    CMD_Project --> SVC_Project
+    CMD_Doc --> SVC_Doc
+    CMD_Chat --> SVC_Conv
+    CMD_Speech --> SVC_Speech
+
+    SVC_Doc --> SVC_Embed
+    SVC_Conv --> SVC_LLM
+    SVC_Project --> Adapter
+    SVC_Doc --> Adapter
+    SVC_Conv --> Adapter
+
+    Adapter --> Client
+    Client --> DB
+    DB --> Tables
+    DB --> VectorColl
+
+    SVC_Embed --> DashScope
+    SVC_LLM --> DashScope
+```
+
+- **前端**：React + TypeScript，负责状态与界面。
+- **命令层**：Tauri 命令（项目、文档、对话、语音）连接前端与 Rust 服务。
+- **服务层**：ProjectService、DocumentService、ConversationService、EmbeddingService、LLMClient、SpeechService。
+- **数据层**：SeekDbAdapter 通过 **seekdb-rs** 异步 Client 与嵌入式 SeekDB（SQL + 向量集合）通信，无 Python。
+- **外部**：阿里云百炼 API 提供 Embedding 与 LLM。
 
 ## 快速开始
 
 ### 环境要求
 
-- Node.js 16+
-- Rust 1.70+
-- Python 3.8+
+**构建 / 开发环境**（本地开发或打包）：
 
-> **注意**: SeekDB 目前仅发布 Linux 版本，不久会支持 MacOS。MacOS 用户推荐使用 [UTM](https://mac.getutm.app) 虚拟机管理器运行 [Ubuntu 20.x 以上](https://mac.getutm.app/gallery/ubuntu-20-04)。
+- Node.js 16+（前端与 Tauri CLI）
+- Rust 1.70+（Tauri 后端）
+- 无需 Python（seekdb-rs 为 Rust 原生）
 
 ### 安装依赖
 
@@ -184,7 +243,7 @@ MineKB 采用 RAG（Retrieval-Augmented Generation）架构，结合向量检索
 # 安装前端依赖
 npm install
 
-# Rust 和 Python 依赖会在构建时自动安装
+# Rust 依赖在构建时自动解析
 ```
 
 ### 配置
@@ -201,6 +260,9 @@ cp src-tauri/config.example.json src-tauri/config.json
 ```bash
 # 启动开发服务器
 tnpm run tauri:dev
+
+# 自定义数据目录时可设置环境变量 CONFIG_DIR
+CONFIG_DIR=/path/to/your/data tnpm run tauri:dev
 ```
 
 ### 构建应用
@@ -234,7 +296,7 @@ cd src-tauri && cargo test
 - ✅ **HNSW 索引**：专业的向量索引算法，检索更快更准
 - ✅ **AI-Native 特性**：内置全文检索、混合检索等 AI 能力
 - ✅ **更好的扩展性**：支持更大规模的数据和更复杂的查询
-- ✅ **最新版本特性**（0.0.1.dev4）：向量列输出、数据库验证、USE 语句稳定支持
+- ✅ **seekdb-rs**（Rust）：嵌入式客户端，无 Python 依赖，支持向量列输出与数据库存在性验证
 
 ---
 

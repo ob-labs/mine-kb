@@ -1,8 +1,5 @@
 # 🔧 路径问题修复总结
 
-> **历史文档**: 本文档记录了早期版本的路径问题修复。  
-> **当前版本**: SeekDB 0.0.1.dev4，相关问题已修复。  
-> **参考**: [SeekDB 0.0.1.dev4 升级指南](UPGRADE_SEEKDB_0.0.1.dev4.md)
 
 ## ✅ 问题已解决
 
@@ -105,7 +102,7 @@ sudo apt install python3-pip
 ### 2. 安装 SeekDB
 
 ```bash
-pip3 install --user seekdb==0.0.1.dev2 -i https://pypi.tuna.tsinghua.edu.cn/simple/
+pip3 install pyseekdb -i https://pypi.tuna.tsinghua.edu.cn/simple/
 ```
 
 ### 3. 验证安装
@@ -120,7 +117,7 @@ python3 test_seekdb.py
 ============================================================
 SeekDB Installation Test
 ============================================================
-Testing oblite import... ✅ OK
+Testing pyseekdb import... ✅ OK
 Testing basic operations...
   Creating database at /tmp/.../test.db... ✅
   ...
@@ -155,10 +152,8 @@ npm run tauri:dev
 
 ## 📚 相关文档
 
-- [PATH_FIX_APPLIED.md](PATH_FIX_APPLIED.md) - 详细的修复说明和下一步指南
 - [SETUP_CHECKLIST.md](SETUP_CHECKLIST.md) - 完整的设置清单
-- [MIGRATION_SEEKDB.md](MIGRATION_SEEKDB.md) - SeekDB 迁移指南
-- [MIGRATION_SUMMARY.md](MIGRATION_SUMMARY.md) - 技术实现总结
+- [seekdb.md](seekdb.md) - SeekDB / pyseekdb 文档
 
 ## 🔄 如果还有问题
 

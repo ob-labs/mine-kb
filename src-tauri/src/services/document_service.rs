@@ -31,7 +31,7 @@ impl DocumentService {
         // Use in-memory path for testing/temporary usage
         let temp_dir = std::env::temp_dir();
         let db_path = temp_dir.join("mine_kb_temp.db");
-        let vector_db = Arc::new(Mutex::new(SeekDbAdapter::new(db_path)?));
+        let vector_db = Arc::new(Mutex::new(SeekDbAdapter::new_async(db_path).await?));
 
         // 从环境变量读取 API Key
         let api_key = std::env::var("DASHSCOPE_API_KEY")
@@ -47,7 +47,7 @@ impl DocumentService {
     }
 
     pub async fn with_db_path(db_path: &str) -> Result<Self> {
-        let vector_db = Arc::new(Mutex::new(SeekDbAdapter::new(db_path)?));
+        let vector_db = Arc::new(Mutex::new(SeekDbAdapter::new_async(db_path).await?));
 
         let api_key = std::env::var("DASHSCOPE_API_KEY")
             .map_err(|_| anyhow!("未找到 DASHSCOPE_API_KEY 环境变量"))?;
@@ -66,19 +66,16 @@ impl DocumentService {
         api_key: String,
         base_url: Option<String>
     ) -> Result<Self> {
-        Self::with_full_config(db_path, api_key, base_url, None).await
+        Self::with_full_config(db_path, api_key, base_url).await
     }
 
     pub async fn with_full_config(
         db_path: &str,
         api_key: String,
         base_url: Option<String>,
-        python_path: Option<&str>
     ) -> Result<Self> {
         log::info!("🏗️  [DOC-SERVICE] 初始化DocumentService, db_path: {}", db_path);
-        let vector_db = Arc::new(Mutex::new(
-            SeekDbAdapter::new_with_python(db_path, python_path.unwrap_or("python3"))?
-        ));
+        let vector_db = Arc::new(Mutex::new(SeekDbAdapter::new_async(db_path).await?));
         log::info!("🏗️  [DOC-SERVICE] 数据库实例已创建");
 
         log::info!("🎯 使用阿里云百炼 Embedding API (text-embedding-v2)");
@@ -166,10 +163,8 @@ impl DocumentService {
                     }
 
                 // Store vectors in database
-                {
-                    let mut db = self.vector_db.lock().await;
-                    db.add_documents(vector_docs)?;
-                }
+                let adapter = self.vector_db.lock().await.clone();
+                adapter.add_documents(vector_docs).await?;
 
                 // Update document status
                 document.processing_status = ProcessingStatus::Indexed;
@@ -206,20 +201,76 @@ impl DocumentService {
         let query_embedding = self.embedding_service.embed_text(query).await?;
         let project_id_str = project_id.map(|id| id.to_string());
 
-        let db = self.vector_db.lock().await;
-
-        // 使用 DashScope embedding，相似度通常在 0.5-0.9 之间
-        let results = db.similarity_search(
-            &query_embedding,
-            project_id_str.as_deref(),
-            limit,
-            0.5, // DashScope embedding 质量高，可以设置较高阈值
-        )?;
+        let adapter = self.vector_db.lock().await.clone();
+        let results = adapter
+            .similarity_search(
+                &query_embedding,
+                project_id_str.as_deref(),
+                limit,
+                0.5, // DashScope embedding 质量高，可以设置较高阈值
+            )
+            .await?;
 
         Ok(results)
     }
 
+    /// 聊天用检索：先尝试混合检索，若嵌入式 SeekDB 报 "Not supported feature or function" 则回退到纯向量检索。
+    pub async fn search_similar_chunks_for_chat(
+        &self,
+        project_id: &str,
+        query: &str,
+        top_k: usize,
+    ) -> Result<Vec<SimilarChunk>> {
+        let query_embedding = self.embedding_service.embed_text(query).await?;
+        let adapter = self.vector_db.lock().await.clone();
+
+        // 先尝试混合检索（服务端 SeekDB 支持）
+        match adapter.hybrid_search(query, &query_embedding, Some(project_id), top_k, 0.7).await {
+            Ok(results) => {
+                log::info!("✅ [CHAT] 混合检索成功，找到 {} 个结果", results.len());
+                log::info!("📌 [CHAT] 本次检索方式: 混合检索");
+                return self.search_results_to_similar_chunks(&results);
+            }
+            Err(e) => {
+                let err_str = e.to_string();
+                let err_lower = err_str.to_lowercase();
+                let fallback = err_str.contains("Not supported") || err_lower.contains("not supported")
+                    || err_lower.contains("parse error");
+                if fallback {
+                    log::info!("⚠️  [CHAT] 混合检索不可用，回退到纯向量检索: {}", err_str);
+                    let results = adapter
+                        .similarity_search(&query_embedding, Some(project_id), top_k, 0.2)
+                        .await?;
+                    log::info!("✅ [CHAT] 向量检索完成，找到 {} 个结果", results.len());
+                    log::info!("📌 [CHAT] 本次检索方式: 纯向量检索（回退）");
+                    return self.search_results_to_similar_chunks(&results);
+                }
+                return Err(e.into());
+            }
+        }
+    }
+
+    fn search_results_to_similar_chunks(
+        &self,
+        results: &[crate::services::seekdb_adapter::SearchResult],
+    ) -> Result<Vec<SimilarChunk>> {
+        let chunks: Vec<SimilarChunk> = results
+            .iter()
+            .map(|result| {
+                let filename = result.document.metadata.get("filename").cloned();
+                SimilarChunk {
+                    document_id: result.document.document_id.clone(),
+                    filename,
+                    content: result.document.content.clone(),
+                    relevance_score: result.similarity,
+                }
+            })
+            .collect();
+        Ok(chunks)
+    }
+
     /// 使用混合检索搜索相关文档块（向量+全文，用于聊天上下文）
+    /// 通过 hybrid_search_by_text 由 adapter 内部做 query 向量化，无需先调用 embed_text。
     pub async fn search_similar_chunks_hybrid(
         &self,
         project_id: &str,
@@ -233,24 +284,17 @@ impl DocumentService {
         log::info!("💬 查询内容: {}", query);
         log::info!("📊 返回数量: {}", top_k);
 
-        // 使用 DashScope API 生成查询向量
-        log::info!("🌐 调用 DashScope Embedding API...");
-        let query_embedding = self.embedding_service.embed_text(query).await?;
-        log::info!("✅ 生成查询向量成功，维度: {}", query_embedding.len());
+        let adapter = self.vector_db.lock().await.clone();
+        log::info!("🔄 执行混合检索（hybrid_search_by_text，adapter 内部向量化）...");
 
-        // 从向量数据库执行混合搜索
-        let db = self.vector_db.lock().await;
-
-        log::info!("🔄 执行混合检索（语义权重=0.7）...");
-
-        // 使用混合检索 (语义权重 0.7 表示更偏重向量相似度)
-        let results = db.hybrid_search(
-            query,
-            &query_embedding,
-            Some(project_id),
-            top_k,
-            0.7, // semantic boost: 0.7 表示向量检索占 70% 权重
-        )?;
+        let results = adapter
+            .hybrid_search_by_text(
+                self.embedding_service.clone(),
+                Some(project_id),
+                query,
+                top_k,
+            )
+            .await?;
 
         log::info!("✅ 混合检索完成，找到 {} 个结果", results.len());
 
@@ -305,19 +349,17 @@ impl DocumentService {
         let query_embedding = self.embedding_service.embed_text(query).await?;
         log::info!("✅ 生成查询向量成功，维度: {}", query_embedding.len());
 
-        // 从向量数据库搜索
-        let db = self.vector_db.lock().await;
-
+        let adapter = self.vector_db.lock().await.clone();
         log::info!("🔍 使用SeekDB向量检索，阈值=0.3");
 
-        // 使用 DashScope embedding，相似度通常在 0.3-0.9 之间
-        // 0.3 作为阈值可以获得较宽泛但相关的结果
-        let results = db.similarity_search(
-            &query_embedding,
-            Some(project_id),
-            top_k,
-            0.3, // DashScope embedding: 0.3=宽泛, 0.4=中等, 0.5+=严格
-        )?;
+        let results = adapter
+            .similarity_search(
+                &query_embedding,
+                Some(project_id),
+                top_k,
+                0.3, // DashScope embedding: 0.3=宽泛, 0.4=中等, 0.5+=严格
+            )
+            .await?;
 
         log::info!("✅ 向量搜索完成（阈值=0.3），找到 {} 个结果", results.len());
 
@@ -415,12 +457,11 @@ impl DocumentService {
         // 从数据库查询实际的文档数量，而不是从内存统计
         // 这样可以确保统计的是累加的总数，而不是当前批次的数量
         if let Some(pid) = project_id {
-            let db = self.vector_db.lock().await;
-            match db.count_project_documents(&pid.to_string()) {
+            let adapter = self.vector_db.lock().await.clone();
+            match adapter.count_project_documents(&pid.to_string()).await {
                 Ok(count) => count,
                 Err(e) => {
                     log::error!("从数据库统计文档数量失败: {}", e);
-                    // 降级到内存统计
                     self.documents
                         .values()
                         .filter(|doc| doc.project_id == pid)
@@ -462,20 +503,19 @@ impl DocumentService {
 mod tests {
     use super::*;
 
-    fn create_test_service() -> DocumentService {
-        let vector_db = VectorDbService::new("localhost", 8000);
-        DocumentService::new(vector_db)
+    async fn create_test_service() -> Result<DocumentService> {
+        DocumentService::new().await
     }
 
-    #[test]
-    fn test_document_service_creation() {
-        let service = create_test_service();
+    #[tokio::test]
+    async fn test_document_service_creation() {
+        let service = create_test_service().await.unwrap();
         assert_eq!(service.documents.len(), 0);
     }
 
     #[tokio::test]
     async fn test_add_document() {
-        let mut service = create_test_service();
+        let mut service = create_test_service().await.unwrap();
         let project_id = Uuid::new_v4();
 
         // This would fail in a real test because the file doesn't exist
@@ -491,9 +531,9 @@ mod tests {
         assert!(result.is_err());
     }
 
-    #[test]
-    fn test_list_documents_by_project() {
-        let service = create_test_service();
+    #[tokio::test]
+    async fn test_list_documents_by_project() {
+        let service = create_test_service().await.unwrap();
         let project_id = Uuid::new_v4();
 
         let documents = service.list_documents(Some(project_id));
@@ -503,9 +543,9 @@ mod tests {
         assert_eq!(all_documents.len(), 0);
     }
 
-    #[test]
-    fn test_supported_file_check() {
-        let service = create_test_service();
+    #[tokio::test]
+    async fn test_supported_file_check() {
+        let service = create_test_service().await.unwrap();
 
         assert!(service.is_supported_file("test.txt"));
         assert!(service.is_supported_file("test.md"));
@@ -513,9 +553,9 @@ mod tests {
         assert!(!service.is_supported_file("test.exe"));
     }
 
-    #[test]
-    fn test_processing_stats() {
-        let service = create_test_service();
+    #[tokio::test]
+    async fn test_processing_stats() {
+        let service = create_test_service().await.unwrap();
         let stats = service.get_processing_stats(None);
         assert!(stats.is_empty());
     }

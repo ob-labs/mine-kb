@@ -3,6 +3,9 @@
 
 #![allow(dead_code)]
 
+/// 应用数据目录路径（供前端 get_app_data_dir 使用，保证 temp 等与后端一致）
+pub struct AppDataDirPath(pub String);
+
 pub mod commands;
 pub mod config;
 pub mod models;

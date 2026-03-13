@@ -277,7 +277,7 @@ npm run tauri dev
 
 1. **删除旧数据库**（开发环境）：
    ```bash
-   rm -rf ~/.local/share/com.mine-kb.app/oblite.db
+   rm -rf ~/.local/share/com.mine-kb.app/
    ```
 
 2. **保留数据迁移**（生产环境）：
@@ -352,10 +352,7 @@ npm run tauri dev
 
 ## 📚 参考文档
 
-- [SeekDB 官方文档](./seekdb.md)
-- [混合检索示例](./seekdb.md#33-混合检索)
-- [向量检索原理](./seekdb.md#31-向量检索)
-- [全文检索原理](./seekdb.md#32-全文检索)
+- [SeekDB in MineKB](./seekdb.md)
 
 ---
 

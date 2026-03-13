@@ -50,6 +50,7 @@ pub async fn create_project(
         let mut project_service = project_service_arc.lock().await;
         project_service
             .create_project(request.name.clone(), request.description.clone())
+            .await
             .map_err(|e| format!("创建项目失败: {}", e))?
     };
 
@@ -80,9 +81,8 @@ pub async fn create_project(
             project.document_count = document_count;
             project.updated_at = chrono::Utc::now();
         }
-        // 保存更新后的项目到数据库
         if let Some(project) = project_service.get_project(project_id) {
-            let _ = project_service.save_project_to_db(project);
+            let _ = project_service.save_project_to_db(project).await;
         }
         project_service
             .get_project(project_id)
@@ -225,6 +225,7 @@ pub async fn delete_project(
     let mut project_service = project_service_arc.lock().await;
     project_service
         .delete_project(project_uuid)
+        .await
         .map_err(|e| format!("删除项目失败: {}", e))?;
 
     log::info!("项目删除成功: {}", project_id);
@@ -258,9 +259,9 @@ pub async fn rename_project(
     let project_service_arc = state.project_service();
     let mut project_service = project_service_arc.lock().await;
 
-    // 更新项目名称
     project_service
         .update_project(project_uuid, Some(request.new_name.trim().to_string()), None)
+        .await
         .map_err(|e| format!("重命名项目失败: {}", e))?;
 
     // 获取更新后的项目信息

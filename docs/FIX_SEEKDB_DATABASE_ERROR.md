@@ -1,8 +1,5 @@
 # 修复 SeekDB "Unknown Database" 错误
 
-> **历史文档**: 本文档记录了早期版本的数据库初始化问题。  
-> **当前版本**: SeekDB 0.0.1.dev4 已增强数据库存在性验证。  
-> **参考**: [SeekDB 0.0.1.dev4 升级指南](UPGRADE_SEEKDB_0.0.1.dev4.md)
 
 ## 问题描述
 
@@ -235,7 +232,6 @@ def handle_init(self, params: Dict[str, Any]):
 
 - `src-tauri/python/seekdb_bridge.py` - SeekDB Python 桥接（已修复）
 - `src-tauri/src/services/seekdb_adapter.rs` - Rust 适配器
-- `docs/FIX_PIP_INSTALL_ERROR.md` - pip 安装问题修复（前置问题）
 
 ## 修复日期
 

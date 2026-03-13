@@ -19,7 +19,11 @@ const SplashScreen: React.FC<SplashScreenProps> = ({
   error,
   onRetry,
 }) => {
-  const progress = (step / totalSteps) * 100;
+  // 仅当 status 为 success 且步骤完成时才显示 100%，避免「步骤 2/2 进行中」就显示 100% 的误导
+  const progress =
+    status === 'success' && step === totalSteps
+      ? 100
+      : Math.min(95, (step / totalSteps) * 100);
 
   return (
     <div className="fixed inset-0 bg-gradient-to-br from-blue-50 to-indigo-100 dark:from-gray-900 dark:to-gray-800 flex items-center justify-center z-50 animate-fadeIn">
@@ -151,8 +155,8 @@ const SplashScreen: React.FC<SplashScreenProps> = ({
 
               {/* Status Message */}
               <div className="space-y-3">
-                <div className="flex items-start space-x-3">
-                  <div className="flex-shrink-0 mt-1">
+                <div className="flex items-center gap-3">
+                  <div className="flex-shrink-0">
                     {status === 'success' ? (
                       <svg
                         className="w-5 h-5 text-green-500"

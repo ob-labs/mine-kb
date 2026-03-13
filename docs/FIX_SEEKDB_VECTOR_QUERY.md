@@ -1,8 +1,5 @@
 # 修复SeekDB向量字段查询问题
 
-> **历史文档**: 本文档记录了早期版本的向量字段查询限制。  
-> **当前版本**: SeekDB 0.0.1.dev4 已部分改进向量列输出支持，但在使用向量函数时仍有限制。  
-> **参考**: [SeekDB 0.0.1.dev4 升级指南](UPGRADE_SEEKDB_0.0.1.dev4.md)
 
 **日期**: 2025-10-29  
 **问题**: SeekDB不支持在某些上下文中直接SELECT vector类型字段  
@@ -249,7 +246,6 @@ Finished `release` profile [optimized] target(s) in 41.00s
 ## 相关文档
 
 - [RESTORE_SEEKDB_VECTOR_SEARCH.md](./RESTORE_SEEKDB_VECTOR_SEARCH.md) - 恢复使用SeekDB向量检索
-- [MIGRATION_SUMMARY.md](./MIGRATION_SUMMARY.md) - SeekDB迁移总结
 - [seekdb.md](./seekdb.md) - SeekDB使用说明
 
 ## 总结

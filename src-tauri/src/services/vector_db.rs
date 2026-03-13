@@ -271,8 +271,6 @@ impl VectorDbService {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::document::DocumentChunk;
-    use chrono::Utc;
 
     #[test]
     fn test_collection_name_generation() {

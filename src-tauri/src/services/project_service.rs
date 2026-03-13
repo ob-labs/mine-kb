@@ -14,30 +14,23 @@ pub struct ProjectService {
 }
 
 impl ProjectService {
-    pub fn new(db: Arc<Mutex<SeekDbAdapter>>) -> Self {
+    pub async fn new_async(db: Arc<Mutex<SeekDbAdapter>>) -> Result<Self> {
         let mut service = Self {
             projects: HashMap::new(),
             db,
         };
 
-        // 从数据库加载已有项目
-        if let Err(e) = service.load_projects_from_db() {
+        if let Err(e) = service.load_projects_from_db().await {
             log::error!("加载项目失败: {}", e);
         }
 
-        service
+        Ok(service)
     }
 
     /// 从数据库加载项目到内存
-    fn load_projects_from_db(&mut self) -> Result<()> {
-        let db = self.db.clone();
-        let db_guard = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                db.lock().await
-            })
-        });
-
-        let projects = db_guard.load_all_projects()?;
+    async fn load_projects_from_db(&mut self) -> Result<()> {
+        let adapter = self.db.lock().await.clone();
+        let projects = adapter.load_all_projects().await?;
         log::info!("从数据库加载了 {} 个项目", projects.len());
 
         for project in projects {
@@ -48,37 +41,25 @@ impl ProjectService {
     }
 
     /// 保存项目到数据库
-    pub fn save_project_to_db(&self, project: &Project) -> Result<()> {
-        let db = self.db.clone();
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                let mut db_guard = db.lock().await;
-                db_guard.save_project(project)
-            })
-        })
+    pub async fn save_project_to_db(&self, project: &Project) -> Result<()> {
+        let adapter = self.db.lock().await.clone();
+        adapter.save_project(project).await
     }
 
     /// 从数据库删除项目
-    fn delete_project_from_db(&self, project_id: Uuid) -> Result<()> {
-        let db = self.db.clone();
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                let mut db_guard = db.lock().await;
-                db_guard.delete_project_by_id(&project_id.to_string())?;
-                db_guard.delete_project_documents(&project_id.to_string())
-                    .map(|_| ())
-            })
-        })
+    async fn delete_project_from_db(&self, project_id: Uuid) -> Result<()> {
+        let adapter = self.db.lock().await.clone();
+        adapter.delete_project_by_id(&project_id.to_string()).await?;
+        adapter.delete_project_documents(&project_id.to_string()).await?;
+        Ok(())
     }
 
-    pub fn create_project(&mut self, name: String, description: Option<String>) -> Result<Uuid> {
+    pub async fn create_project(&mut self, name: String, description: Option<String>) -> Result<Uuid> {
         let project = Project::new(name, description)?;
         let project_id = project.id;
 
-        // 保存到数据库
-        self.save_project_to_db(&project)?;
+        self.save_project_to_db(&project).await?;
 
-        // 保存到内存
         self.projects.insert(project_id, project);
         Ok(project_id)
     }
@@ -95,7 +76,7 @@ impl ProjectService {
         self.projects.values().collect()
     }
 
-    pub fn update_project(
+    pub async fn update_project(
         &mut self,
         project_id: Uuid,
         name: Option<String>,
@@ -115,21 +96,19 @@ impl ProjectService {
             }
         }
 
-        // 保存到数据库
         if let Some(project) = self.projects.get(&project_id) {
-            self.save_project_to_db(project)?;
+            self.save_project_to_db(project).await?;
         }
 
         Ok(())
     }
 
-    pub fn delete_project(&mut self, project_id: Uuid) -> Result<()> {
+    pub async fn delete_project(&mut self, project_id: Uuid) -> Result<()> {
         self.projects
             .remove(&project_id)
             .ok_or_else(|| anyhow!("Project not found: {}", project_id))?;
 
-        // 从数据库删除
-        self.delete_project_from_db(project_id)?;
+        self.delete_project_from_db(project_id).await?;
 
         Ok(())
     }
@@ -167,7 +146,7 @@ impl ProjectService {
         })
     }
 
-    pub fn update_project_status(&mut self, project_id: Uuid, status: crate::models::project::ProjectStatus) -> Result<()> {
+    pub async fn update_project_status(&mut self, project_id: Uuid, status: crate::models::project::ProjectStatus) -> Result<()> {
         {
             let project = self.projects
                 .get_mut(&project_id)
@@ -176,9 +155,8 @@ impl ProjectService {
             project.update_status(status);
         }
 
-        // 保存到数据库
         if let Some(project) = self.projects.get(&project_id) {
-            self.save_project_to_db(project)?;
+            self.save_project_to_db(project).await?;
         }
 
         Ok(())
@@ -207,63 +185,71 @@ pub struct ProjectStats {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::services::seekdb_adapter::SeekDbAdapter;
+    use std::sync::Arc;
+    use tokio::sync::Mutex;
 
-    #[test]
-    fn test_project_service_creation() {
-        let service = ProjectService::new();
+    async fn test_service() -> ProjectService {
+        let path = std::env::temp_dir().join(format!("mine_kb_test_proj_{}.db", std::process::id()));
+        let adapter = SeekDbAdapter::new_async(&path).await.unwrap();
+        ProjectService::new_async(Arc::new(Mutex::new(adapter))).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_project_service_creation() {
+        let service = test_service().await;
         assert_eq!(service.projects.len(), 0);
     }
 
-    #[test]
-    fn test_create_and_get_project() {
-        let mut service = ProjectService::new();
+    #[tokio::test]
+    async fn test_create_and_get_project() {
+        let mut service = test_service().await;
 
         let project_id = service.create_project(
             "Test Project".to_string(),
             Some("A test project".to_string()),
-        ).unwrap();
+        ).await.unwrap();
 
         let project = service.get_project(project_id).unwrap();
         assert_eq!(project.name, "Test Project");
         assert_eq!(project.description, Some("A test project".to_string()));
-        assert!(!project.is_archived);
     }
 
-    #[test]
-    fn test_update_project() {
-        let mut service = ProjectService::new();
+    #[tokio::test]
+    async fn test_update_project() {
+        let mut service = test_service().await;
 
-        let project_id = service.create_project("Original".to_string(), None).unwrap();
+        let project_id = service.create_project("Original".to_string(), None).await.unwrap();
 
         service.update_project(
             project_id,
             Some("Updated".to_string()),
             Some("Updated description".to_string()),
-        ).unwrap();
+        ).await.unwrap();
 
         let project = service.get_project(project_id).unwrap();
         assert_eq!(project.name, "Updated");
         assert_eq!(project.description, Some("Updated description".to_string()));
     }
 
-    #[test]
-    fn test_delete_project() {
-        let mut service = ProjectService::new();
+    #[tokio::test]
+    async fn test_delete_project() {
+        let mut service = test_service().await;
 
-        let project_id = service.create_project("Test".to_string(), None).unwrap();
+        let project_id = service.create_project("Test".to_string(), None).await.unwrap();
         assert!(service.get_project(project_id).is_some());
 
-        service.delete_project(project_id).unwrap();
+        service.delete_project(project_id).await.unwrap();
         assert!(service.get_project(project_id).is_none());
     }
 
-    #[test]
-    fn test_find_projects_by_name() {
-        let mut service = ProjectService::new();
+    #[tokio::test]
+    async fn test_find_projects_by_name() {
+        let mut service = test_service().await;
 
-        service.create_project("My Project".to_string(), None).unwrap();
-        service.create_project("Another Project".to_string(), None).unwrap();
-        service.create_project("Something Else".to_string(), None).unwrap();
+        service.create_project("My Project".to_string(), None).await.unwrap();
+        service.create_project("Another Project".to_string(), None).await.unwrap();
+        service.create_project("Something Else".to_string(), None).await.unwrap();
 
         let results = service.find_projects_by_name("project");
         assert_eq!(results.len(), 2);
@@ -272,20 +258,17 @@ mod tests {
         assert_eq!(results.len(), 1);
     }
 
-    #[test]
-    fn test_project_status_update() {
-        let mut service = ProjectService::new();
+    #[tokio::test]
+    async fn test_project_status_update() {
+        let mut service = test_service().await;
 
-        let project_id = service.create_project("Test".to_string(), None).unwrap();
+        let project_id = service.create_project("Test".to_string(), None).await.unwrap();
 
-        // Initially Created status
         assert_eq!(service.get_project(project_id).unwrap().status, crate::models::project::ProjectStatus::Created);
 
-        // Update to Processing
-        service.update_project_status(project_id, crate::models::project::ProjectStatus::Processing).unwrap();
+        service.update_project_status(project_id, crate::models::project::ProjectStatus::Processing).await.unwrap();
         assert_eq!(service.get_project(project_id).unwrap().status, crate::models::project::ProjectStatus::Processing);
 
-        // Test filtering by status
         let processing_projects = service.list_projects_by_status(crate::models::project::ProjectStatus::Processing);
         assert_eq!(processing_projects.len(), 1);
 
@@ -293,11 +276,11 @@ mod tests {
         assert_eq!(ready_projects.len(), 0);
     }
 
-    #[test]
-    fn test_project_stats() {
-        let mut service = ProjectService::new();
+    #[tokio::test]
+    async fn test_project_stats() {
+        let mut service = test_service().await;
 
-        let project_id = service.create_project("Test".to_string(), None).unwrap();
+        let project_id = service.create_project("Test".to_string(), None).await.unwrap();
         let stats = service.get_project_stats(project_id).unwrap();
 
         assert_eq!(stats.project_id, project_id);
@@ -305,11 +288,11 @@ mod tests {
         assert_eq!(stats.conversation_count, 0);
     }
 
-    #[test]
-    fn test_project_exists() {
-        let mut service = ProjectService::new();
+    #[tokio::test]
+    async fn test_project_exists() {
+        let mut service = test_service().await;
 
-        let project_id = service.create_project("Test".to_string(), None).unwrap();
+        let project_id = service.create_project("Test".to_string(), None).await.unwrap();
         assert!(service.project_exists(project_id));
 
         let non_existent_id = Uuid::new_v4();

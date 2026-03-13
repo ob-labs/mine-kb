@@ -150,25 +150,36 @@ pub async fn upload_documents(
 
     // 更新项目的文档数量
     {
-        // 先计算文档数量（从数据库查询，确保是累加的总数）
+        // 从数据库查询实际文档数（vector_documents 中该项目的 DISTINCT document_id 数）
         let doc_count = {
             let doc_service = state.document_service();
             let doc_service_guard = doc_service.lock().await;
             doc_service_guard.count_documents(Some(project_id)).await
         };
 
-        log::info!("📊 项目 {} 的文档总数: {}", project_id, doc_count);
-
-        // 然后更新项目
         let project_service = state.project_service();
         let mut project_service_guard = project_service.lock().await;
         if let Some(project) = project_service_guard.get_project_mut(project_id) {
-            project.document_count = doc_count as u32;
+            let previous_count = project.document_count as usize;
+            // 若 DB 统计为 0 但本批有成功上传，用「原数量 + 本批成功数」兜底，避免界面一直显示 0
+            let final_count = if doc_count == 0 && !successful_docs.is_empty() {
+                let fallback = previous_count + successful_docs.len();
+                log::warn!(
+                    "📊 项目 {} 的 DB 文档数为 0，本批成功 {} 个，使用兜底数量: {}",
+                    project_id,
+                    successful_docs.len(),
+                    fallback
+                );
+                fallback
+            } else {
+                log::info!("📊 项目 {} 的文档总数: {} (DB)", project_id, doc_count);
+                doc_count
+            };
+            project.document_count = final_count as u32;
             project.updated_at = chrono::Utc::now();
 
-            // 保存更新到数据库
             let project_clone = project.clone();
-            let _ = project_service_guard.save_project_to_db(&project_clone);
+            let _ = project_service_guard.save_project_to_db(&project_clone).await;
         }
     }
 

@@ -166,8 +166,7 @@ app.emit_all("startup-progress", StartupEvent::error(
 2. 前端显示 SplashScreen，监听启动事件
    ↓
 3. 后端发送事件：步骤 1 - 检查 SeekDB 依赖
-   ├─ 检查 oblite.so 是否存在
-   ├─ 如不存在则自动下载
+   ├─ 使用 seekdb-rs 打开/创建嵌入式数据库（无 Python）
    └─ 成功 → 发送成功事件
    ↓
 4. 后端发送事件：步骤 2 - 加载配置文件
@@ -262,11 +261,9 @@ app.emit_all("startup-progress", StartupEvent::error(
 - 验证动画效果
 - 验证启动成功后自动隐藏
 
-### 2. SeekDB 下载测试
-- 删除 `oblite.so`
-- 启动应用
-- 观察下载进度是否正常显示
-- 验证下载成功后继续启动
+### 2. SeekDB 初始化测试
+- 使用全新数据目录启动应用
+- 验证嵌入式数据库创建成功并继续启动
 
 ### 3. 配置错误测试
 - 删除或重命名 `config.json`
@@ -309,7 +306,7 @@ app.emit_all("startup-progress", StartupEvent::error(
 
 ## 相关文档
 
-- [SeekDB 自动安装文档](./SEEKDB_AUTO_INSTALL.md)
+- [SeekDB in MineKB](./seekdb.md)
 - [应用配置指南](../README.md)
 
 ---

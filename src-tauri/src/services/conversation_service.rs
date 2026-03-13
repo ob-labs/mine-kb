@@ -45,19 +45,17 @@ impl ConversationService {
     async fn load_from_database(&mut self) -> Result<()> {
         log::info!("load_from_database: 开始执行");
 
-        let db = self.db.lock().await;
+        let adapter = self.db.lock().await.clone();
         log::info!("load_from_database: 成功获取数据库锁");
 
-        // 加载所有对话
-        let conversations = db.load_all_conversations()?;
+        let conversations = adapter.load_all_conversations().await?;
         log::info!("✅ 从数据库加载了 {} 个对话", conversations.len());
 
         for conv in conversations {
             let conv_id = conv.id;
             log::info!("处理对话: id={}, title={}", conv_id, conv.title);
 
-            // 加载该对话的所有消息
-            match db.load_messages_by_conversation(&conv_id.to_string()) {
+            match adapter.load_messages_by_conversation(&conv_id.to_string()).await {
                 Ok(messages) => {
                     log::info!("✅ 对话 {} 加载了 {} 条消息", conv_id, messages.len());
                     self.conversations.insert(conv_id, conv);
@@ -66,7 +64,6 @@ impl ConversationService {
                 Err(e) => {
                     log::error!("❌ 对话 {} 加载消息失败: {}", conv_id, e);
                     log::error!("错误详情: {:?}", e);
-                    // 即使某个对话加载失败，也继续加载其他对话
                     self.conversations.insert(conv_id, conv);
                     self.messages.insert(conv_id, Vec::new());
                 }
@@ -81,11 +78,8 @@ impl ConversationService {
         let conversation = Conversation::new(project_id, title)?;
         let conversation_id = conversation.id;
 
-        // 保存到数据库
-        {
-            let mut db = self.db.lock().await;
-            db.save_conversation(&conversation)?;
-        }
+        let adapter = self.db.lock().await.clone();
+        adapter.save_conversation(&conversation).await?;
 
         self.conversations.insert(conversation_id, conversation);
         self.messages.insert(conversation_id, Vec::new());
@@ -129,31 +123,28 @@ impl ConversationService {
         let message_id = message.id;
         log::info!("创建消息对象成功: message_id={}", message_id);
 
-        // ⭐ 保存前检查数据库状态
         {
-            let db = self.db.lock().await;
-            let count = db.get_message_count().unwrap_or(-1);
+            let adapter = self.db.lock().await.clone();
+            let count = adapter.get_message_count().await.unwrap_or(-1);
             log::warn!("🔍 [BEFORE-SAVE] 锁定数据库前，messages总数: {}", count);
         }
 
-        // 保存消息到数据库
         {
             log::info!("尝试获取数据库锁以保存消息...");
-            let mut db = self.db.lock().await;
+            let adapter = self.db.lock().await.clone();
             log::info!("成功获取数据库锁");
             log::info!("调用 save_message...");
-            db.save_message(&message)?;
+            adapter.save_message(&message).await?;
             log::info!("消息保存到数据库成功");
 
-            // ⭐ 保存后立即验证
-            let count = db.get_message_count().unwrap_or(-1);
+            let count = adapter.get_message_count().await.unwrap_or(-1);
             log::warn!("🔍 [AFTER-SAVE-IN-LOCK] 保存后，释放锁前，messages总数: {}", count);
         }
 
         // ⭐ 释放锁后立即检查
         {
-            let db = self.db.lock().await;
-            let count = db.get_message_count().unwrap_or(-1);
+            let adapter = self.db.lock().await.clone();
+            let count = adapter.get_message_count().await.unwrap_or(-1);
             log::warn!("🔍 [AFTER-LOCK-RELEASE] 释放锁后，messages总数: {}", count);
         }
 
@@ -166,22 +157,19 @@ impl ConversationService {
         conversation.increment_message_count();
         log::info!("对话消息计数已更新");
 
-        // 更新对话到数据库
         {
             log::info!("尝试获取数据库锁以更新对话...");
-            let mut db = self.db.lock().await;
+            let adapter = self.db.lock().await.clone();
             log::info!("成功获取数据库锁");
 
-            // ⭐ 更新对话前再次检查
-            let count = db.get_message_count().unwrap_or(-1);
+            let count = adapter.get_message_count().await.unwrap_or(-1);
             log::warn!("🔍 [BEFORE-UPDATE-CONV] 更新对话前，messages总数: {}", count);
 
             log::info!("调用 save_conversation...");
-            db.save_conversation(conversation)?;
+            adapter.save_conversation(conversation).await?;
             log::info!("对话更新到数据库成功");
 
-            // ⭐ 更新后检查
-            let count = db.get_message_count().unwrap_or(-1);
+            let count = adapter.get_message_count().await.unwrap_or(-1);
             log::warn!("🔍 [AFTER-UPDATE-CONV] 更新对话后，messages总数: {}", count);
         }
 
@@ -196,20 +184,18 @@ impl ConversationService {
 
         conversation.update_title(title)?;
 
-        // 保存到数据库
         {
-            let mut db = self.db.lock().await;
-            db.save_conversation(conversation)?;
+            let adapter = self.db.lock().await.clone();
+            adapter.save_conversation(conversation).await?;
         }
 
         Ok(())
     }
 
     pub async fn delete_conversation(&mut self, conversation_id: Uuid) -> Result<()> {
-        // 从数据库删除
         {
-            let mut db = self.db.lock().await;
-            db.delete_conversation_by_id(&conversation_id.to_string())?;
+            let adapter = self.db.lock().await.clone();
+            adapter.delete_conversation_by_id(&conversation_id.to_string()).await?;
         }
 
         self.conversations
@@ -234,19 +220,16 @@ impl ConversationService {
             return Err(anyhow!("Message not found: {}", message_id));
         }
 
-        // 从数据库删除
         {
-            let mut db = self.db.lock().await;
-            db.delete_message_by_id(&message_id.to_string())?;
+            let adapter = self.db.lock().await.clone();
+            adapter.delete_message_by_id(&message_id.to_string()).await?;
         }
 
-        // 更新对话的消息数量
         conversation.update_message_count(messages.len() as u32);
 
-        // 更新对话到数据库
         {
-            let mut db = self.db.lock().await;
-            db.save_conversation(conversation)?;
+            let adapter = self.db.lock().await.clone();
+            adapter.save_conversation(conversation).await?;
         }
 
         Ok(())
@@ -257,20 +240,17 @@ impl ConversationService {
             .get_mut(&conversation_id)
             .ok_or_else(|| anyhow!("Conversation not found: {}", conversation_id))?;
 
-        // 从数据库删除所有消息
         {
-            let mut db = self.db.lock().await;
-            db.delete_messages_by_conversation(&conversation_id.to_string())?;
+            let adapter = self.db.lock().await.clone();
+            adapter.delete_messages_by_conversation(&conversation_id.to_string()).await?;
         }
 
-        // 清空内存中的消息
         self.messages.entry(conversation_id).or_insert_with(Vec::new).clear();
         conversation.update_message_count(0);
 
-        // 更新对话到数据库
         {
-            let mut db = self.db.lock().await;
-            db.save_conversation(conversation)?;
+            let adapter = self.db.lock().await.clone();
+            adapter.save_conversation(conversation).await?;
         }
 
         Ok(())
@@ -285,8 +265,7 @@ impl ConversationService {
 
         let mut messages = self.messages.get(&conversation_id).cloned().unwrap_or_default();
         
-        // 确保消息按创建时间升序排序（从旧到新）
-        messages.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
+        messages.sort_by(|a, b| a.timestamp.cmp(&b.timestamp).then_with(|| a.id.cmp(&b.id)));
         
         log::info!("get_conversation_messages: 从内存返回 {} 条消息（已按时间排序）", messages.len());
 
@@ -317,49 +296,57 @@ impl ConversationService {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::services::seekdb_adapter::SeekDbAdapter;
+    use std::sync::Arc;
 
-    #[test]
-    fn test_conversation_service_creation() {
-        let service = ConversationService::new();
+    async fn test_service() -> ConversationService {
+        let path = std::env::temp_dir().join(format!("mine_kb_test_conv_{}.db", std::process::id()));
+        let adapter = SeekDbAdapter::new_async(&path).await.unwrap();
+        ConversationService::new(Arc::new(Mutex::new(adapter))).await
+    }
+
+    #[tokio::test]
+    async fn test_conversation_service_creation() {
+        let service = test_service().await;
         assert_eq!(service.conversations.len(), 0);
     }
 
-    #[test]
-    fn test_create_and_get_conversation() {
-        let mut service = ConversationService::new();
+    #[tokio::test]
+    async fn test_create_and_get_conversation() {
+        let mut service = test_service().await;
         let project_id = Uuid::new_v4();
 
-        let conversation_id = service.create_conversation(project_id, Some("Test Conversation".to_string())).unwrap();
+        let conversation_id = service.create_conversation(project_id, Some("Test Conversation".to_string())).await.unwrap();
         let conversation = service.get_conversation(conversation_id).unwrap();
 
         assert_eq!(conversation.title, "Test Conversation");
         assert_eq!(conversation.project_id, project_id);
-        assert_eq!(conversation.messages.len(), 0);
+        assert_eq!(service.get_conversation_messages(conversation_id).unwrap().len(), 0);
     }
 
-    #[test]
-    fn test_add_message() {
-        let mut service = ConversationService::new();
+    #[tokio::test]
+    async fn test_add_message() {
+        let mut service = test_service().await;
         let project_id = Uuid::new_v4();
 
-        let conversation_id = service.create_conversation(project_id, Some("Test".to_string())).unwrap();
-        let message_id = service.add_message(conversation_id, MessageRole::User, "Hello".to_string()).unwrap();
+        let conversation_id = service.create_conversation(project_id, Some("Test".to_string())).await.unwrap();
+        let message_id = service.add_message(conversation_id, MessageRole::User, "Hello".to_string()).await.unwrap();
 
-        let conversation = service.get_conversation(conversation_id).unwrap();
-        assert_eq!(conversation.messages.len(), 1);
-        assert_eq!(conversation.messages[0].id, message_id);
-        assert_eq!(conversation.messages[0].content, "Hello");
+        let messages = service.get_conversation_messages(conversation_id).unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].id, message_id);
+        assert_eq!(messages[0].content, "Hello");
     }
 
-    #[test]
-    fn test_list_conversations_by_project() {
-        let mut service = ConversationService::new();
+    #[tokio::test]
+    async fn test_list_conversations_by_project() {
+        let mut service = test_service().await;
         let project1 = Uuid::new_v4();
         let project2 = Uuid::new_v4();
 
-        service.create_conversation(project1, Some("Conv 1".to_string())).unwrap();
-        service.create_conversation(project1, Some("Conv 2".to_string())).unwrap();
-        service.create_conversation(project2, Some("Conv 3".to_string())).unwrap();
+        service.create_conversation(project1, Some("Conv 1".to_string())).await.unwrap();
+        service.create_conversation(project1, Some("Conv 2".to_string())).await.unwrap();
+        service.create_conversation(project2, Some("Conv 3".to_string())).await.unwrap();
 
         let project1_conversations = service.list_conversations(Some(project1));
         assert_eq!(project1_conversations.len(), 2);
@@ -368,15 +355,15 @@ mod tests {
         assert_eq!(all_conversations.len(), 3);
     }
 
-    #[test]
-    fn test_delete_conversation() {
-        let mut service = ConversationService::new();
+    #[tokio::test]
+    async fn test_delete_conversation() {
+        let mut service = test_service().await;
         let project_id = Uuid::new_v4();
 
-        let conversation_id = service.create_conversation(project_id, Some("Test".to_string())).unwrap();
+        let conversation_id = service.create_conversation(project_id, Some("Test".to_string())).await.unwrap();
         assert!(service.get_conversation(conversation_id).is_some());
 
-        service.delete_conversation(conversation_id).unwrap();
+        service.delete_conversation(conversation_id).await.unwrap();
         assert!(service.get_conversation(conversation_id).is_none());
     }
 }

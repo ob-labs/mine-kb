@@ -1,8 +1,6 @@
 # 更新摘要：混合检索与对话日志
 
 > **历史文档**: 本文档记录了早期版本的功能更新。  
-> **当前版本**: SeekDB 0.0.1.dev4，模块名已从 `oblite` 更改为 `seekdb`。  
-> **参考**: [SeekDB 0.0.1.dev4 升级指南](UPGRADE_SEEKDB_0.0.1.dev4.md)
 
 ## ✅ 已完成的功能
 
@@ -92,7 +90,7 @@ npm run tauri dev
 **开发环境（推荐）：**
 ```bash
 # 删除旧数据库
-rm -rf ~/.local/share/com.mine-kb.app/oblite.db
+rm -rf ~/.local/share/com.mine-kb.app/
 # 重启应用会自动创建新表结构
 ```
 

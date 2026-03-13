@@ -365,7 +365,6 @@ SELECT * FROM vector_documents WHERE id = ?
 - [FIX_SEEKDB_VECTOR_QUERY.md](./FIX_SEEKDB_VECTOR_QUERY.md) - 修复实施文档
 - [RESTORE_SEEKDB_VECTOR_SEARCH.md](./RESTORE_SEEKDB_VECTOR_SEARCH.md) - 向量检索恢复
 - [seekdb.md](./seekdb.md) - SeekDB官方文档
-- [MIGRATION_SUMMARY.md](./MIGRATION_SUMMARY.md) - 迁移总结
 
 ---
 

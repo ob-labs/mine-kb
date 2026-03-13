@@ -1,8 +1,5 @@
 # 完整修复总结
 
-> **历史文档**: 本文档记录了 2025-10-29 的修复过程，当时使用的是 SeekDB 0.0.1.dev2 版本。  
-> **当前版本**: 已升级到 SeekDB 0.0.1.dev4，模块名从 `oblite` 更改为 `seekdb`。  
-> **参考**: [SeekDB 0.0.1.dev4 升级指南](UPGRADE_SEEKDB_0.0.1.dev4.md)
 
 ## 概述
 
@@ -45,7 +42,6 @@
 - ✅ `src-tauri/src/services/seekdb_package.rs`
 - ✅ `src-tauri/src/services/python_env.rs`
 
-**详细文档**: `docs/FIX_PIP_INSTALL_ERROR.md`
 
 ---
 
@@ -68,7 +64,7 @@ ModuleNotFoundError: No module named 'oblite'
 import oblite  # 失败
 
 # 正确的方式
-import seekdb  # 先导入 seekdb
+import pyseekdb
 import oblite  # 然后才能导入 oblite
 ```
 
@@ -169,17 +165,14 @@ ubuntu  53026  9.1  1.9 74151808 161456 ?  Sl  03:45  0:06  mine-kb
 ### Python 代码
 
 3. **`src-tauri/python/seekdb_bridge.py`**
-   - 修改导入顺序：先 `import seekdb`，再 `import oblite`
+   - 使用 pyseekdb 客户端连接
    - 重写 `handle_init()` 方法，添加数据库自动创建逻辑
    - 使用 `oblite.connect("")` 访问系统上下文
    - 执行 `CREATE DATABASE IF NOT EXISTS` 确保数据库存在
 
 ### 文档
 
-4. **`docs/FIX_PIP_INSTALL_ERROR.md`**
-   - pip 安装问题的详细分析和解决方案
-
-5. **`docs/FIX_SEEKDB_DATABASE_ERROR.md`**
+4. **`docs/FIX_SEEKDB_DATABASE_ERROR.md`**
    - SeekDB 数据库问题的详细分析和解决方案
 
 6. **`docs/COMPLETE_FIX_SUMMARY.md`** (本文档)
@@ -284,8 +277,7 @@ except Exception as e:
 
 - [x] Python 虚拟环境存在
 - [x] pip 可用（`python -m pip --version`）
-- [x] seekdb 已安装（`python -c "import seekdb"`）
-- [x] oblite 可导入（`python -c "import seekdb; import oblite"`）
+- [x] pyseekdb 已安装（`python -c "import pyseekdb"`）
 - [x] 数据库实例目录存在或会自动创建
 - [x] 数据库会在初始化时自动创建
 
@@ -312,9 +304,8 @@ except Exception as e:
 ## 相关资源
 
 ### 文档
-- [pip 安装问题修复](./FIX_PIP_INSTALL_ERROR.md)
 - [SeekDB 数据库问题修复](./FIX_SEEKDB_DATABASE_ERROR.md)
-- [SeekDB 自动安装文档](./SEEKDB_AUTO_INSTALL.md)
+- [seekdb.md](./seekdb.md) - SeekDB / pyseekdb 文档
 
 ### 代码文件
 - `src-tauri/src/services/python_env.rs` - Python 环境管理

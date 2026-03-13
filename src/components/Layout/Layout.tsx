@@ -202,7 +202,7 @@ const Layout: React.FC<LayoutProps> = ({ selectedProjectId, onProjectSelect, the
   };
 
   return (
-    <div className="flex h-screen bg-background border-t border-border">
+    <div className="flex h-full min-h-screen bg-background border-t border-border">
       {/* Left Panel - Project List */}
       <div
         className="bg-card border-r border-border p-4 flex flex-col"

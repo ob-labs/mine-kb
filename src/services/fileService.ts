@@ -1,6 +1,4 @@
 import { invoke } from '@tauri-apps/api/tauri';
-import { writeBinaryFile, createDir } from '@tauri-apps/api/fs';
-import { appDataDir, join } from '@tauri-apps/api/path';
 
 export interface UploadDocumentsRequest {
   project_id: string;
@@ -39,46 +37,37 @@ export interface FileInfo {
 }
 
 /**
- * 将文件保存到临时目录并返回路径
+ * 将文件保存到临时目录并返回路径。
+ * 通过后端命令写入 app_data_dir/tmp，避免前端 fs scope 与 CONFIG_DIR 路径不一致导致开发时报错。
  */
 export async function saveFilesToTemp(files: File[]): Promise<string[]> {
   const filePaths: string[] = [];
 
   try {
-    // 确保临时目录存在
-    const appDir = await appDataDir();
-    const tempDir = await join(appDir, 'temp');
-
-    try {
-      await createDir(tempDir, { recursive: true });
-    } catch (error) {
-      // 目录可能已存在，忽略错误
-      console.log('临时目录已存在或创建失败:', error);
-    }
-
     for (const file of files) {
       try {
-        // 生成临时文件名
         const timestamp = Date.now();
         const randomId = Math.random().toString(36).substring(2, 15);
         const fileName = `${timestamp}_${randomId}_${file.name}`;
-        const filePath = await join(tempDir, fileName);
 
-        // 读取文件内容
         const arrayBuffer = await file.arrayBuffer();
-        const uint8Array = new Uint8Array(arrayBuffer);
+        const bytes = new Uint8Array(arrayBuffer);
+        let binary = '';
+        for (let i = 0; i < bytes.length; i++) {
+          binary += String.fromCharCode(bytes[i]);
+        }
+        const contentBase64 = btoa(binary);
 
-        // 写入文件到临时目录
-        await writeBinaryFile(filePath, uint8Array);
+        const filePath = await invoke<string>('save_file_to_app_tmp', {
+          args: { filename: fileName, contentBase64 },
+        });
         filePaths.push(filePath);
-
         console.log(`文件已保存到: ${filePath}`);
       } catch (error) {
         console.error(`保存文件 ${file.name} 失败:`, error);
         throw new Error(`保存文件 ${file.name} 失败: ${error}`);
       }
     }
-
     return filePaths;
   } catch (error) {
     console.error('创建临时目录失败:', error);
